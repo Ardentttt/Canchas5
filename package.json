@@ -1,0 +1,9 @@
+{
+  "name": "cancha5",
+  "version": "1.0.0",
+  "description": "Sistema de reservas de canchas de futbol 5",
+  "dependencies": {
+    "mercadopago": "^2.0.6",
+    "googleapis": "^140.0.0"
+  }
+}
