@@ -146,11 +146,16 @@ async function registrarEnSheet(data) {
 
 // ── Cliente autenticado de Google Sheets ──
 async function getSheetsClient() {
-  const auth = new google.auth.JWT(
-    GOOGLE_SA_EMAIL,
-    null,
-    GOOGLE_SA_KEY.replace(/\\n/g, "\n"),
-    ["https://www.googleapis.com/auth/spreadsheets"]
-  );
+  const key = GOOGLE_SA_KEY
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  const auth = new google.auth.GoogleAuth({
+    credentials: {
+      client_email: GOOGLE_SA_EMAIL,
+      private_key: key
+    },
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+  });
   return google.sheets({ version: "v4", auth });
 }
