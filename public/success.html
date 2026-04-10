@@ -1,10 +1,121 @@
-<!-- success.html -->
-<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Reserva confirmada</title>
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;900&family=Barlow:wght@400&display=swap" rel="stylesheet"/>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Barlow',sans-serif;background:#0a0f0d;color:#c8d9cc;min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:2rem}.icon{font-size:5rem;margin-bottom:1rem;animation:pop .4s ease}@keyframes pop{0%{transform:scale(0)}70%{transform:scale(1.2)}100%{transform:scale(1)}}h1{font-family:'Barlow Condensed',sans-serif;font-size:2.5rem;font-weight:900;color:#00e87a;margin-bottom:.5rem}p{max-width:340px;line-height:1.65;color:#c8d9cc;margin-bottom:1.5rem}.btn{padding:.75rem 2rem;background:#00e87a;color:#0a0f0d;border:none;border-radius:100px;font-family:'Barlow Condensed',sans-serif;font-size:1rem;font-weight:800;cursor:pointer;text-decoration:none;display:inline-block}
-</style></head><body>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Reserva confirmada</title>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;900&family=Barlow:wght@300;400&display=swap" rel="stylesheet"/>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Barlow',sans-serif;background:#0a0f0d;color:#c8d9cc;min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:2rem}
+    .icon{font-size:5rem;margin-bottom:1rem;animation:pop .5s ease}
+    @keyframes pop{0%{transform:scale(0);opacity:0}70%{transform:scale(1.2)}100%{transform:scale(1);opacity:1}}
+    h1{font-family:'Barlow Condensed',sans-serif;font-size:2.5rem;font-weight:900;color:#00e87a;margin-bottom:.5rem}
+    p{max-width:360px;line-height:1.65;color:#c8d9cc;margin-bottom:.5rem;font-size:.95rem}
+    .detail-box{background:#141f17;border:1px solid #1e2e22;border-radius:14px;padding:1.2rem 1.5rem;max-width:360px;width:100%;text-align:left;margin:1.2rem 0}
+    .dr{display:flex;justify-content:space-between;font-size:.88rem;margin-bottom:.4rem}
+    .dr span:first-child{color:#5a7060}
+    .dr span:last-child{color:#f0f5f1;font-weight:500}
+    .divider{border:none;border-top:1px solid #1e2e22;margin:.6rem 0}
+    .btn-wa{display:inline-flex;align-items:center;gap:.5rem;padding:.85rem 2rem;background:#25d366;border:none;border-radius:100px;color:#fff;font-family:'Barlow Condensed',sans-serif;font-size:1.1rem;font-weight:800;cursor:pointer;text-decoration:none;transition:all .2s;margin-bottom:.75rem}
+    .btn-wa:hover{background:#1ebe5d;box-shadow:0 0 20px rgba(37,211,102,.4)}
+    .btn-home{display:inline-flex;align-items:center;gap:.4rem;padding:.65rem 1.8rem;background:transparent;border:1px solid #1e2e22;border-radius:100px;color:#5a7060;font-family:'Barlow Condensed',sans-serif;font-size:.95rem;font-weight:700;cursor:pointer;text-decoration:none;transition:all .2s}
+    .btn-home:hover{border-color:#00e87a;color:#00e87a}
+    .countdown{font-size:.8rem;color:#5a7060;margin-bottom:1rem}
+    .countdown span{color:#ff9f1c;font-weight:600}
+  </style>
+</head>
+<body>
+
 <div class="icon">✅</div>
 <h1>¡Reserva confirmada!</h1>
-<p>Tu pago fue procesado correctamente. La cancha está reservada para vos. Te esperamos.</p>
-<a class="btn" href="/">← Volver al inicio</a>
-</body></html>
+<p>Tu pago fue procesado. La cancha está reservada para vos.</p>
+
+<div class="detail-box" id="detail-box">
+  <div class="dr"><span>Estado</span><span style="color:#00e87a">✅ CONFIRMADA</span></div>
+  <hr class="divider"/>
+  <div class="dr"><span>Cancha</span><span id="d-cancha">—</span></div>
+  <div class="dr"><span>Fecha</span><span id="d-fecha">—</span></div>
+  <div class="dr"><span>Turno</span><span id="d-slot">—</span></div>
+  <div class="dr"><span>Nombre</span><span id="d-nombre">—</span></div>
+  <hr class="divider"/>
+  <div class="dr"><span>Seña pagada</span><span id="d-monto" style="color:#ffe14d">—</span></div>
+  <div class="dr"><span>Saldo al llegar</span><span id="d-resto" style="color:#5a7060">—</span></div>
+</div>
+
+<p class="countdown">Redirigiendo a WhatsApp en <span id="timer">5</span> segundos…</p>
+
+<a id="wa-btn" class="btn-wa" href="#" target="_blank">💬 Avisar al dueño por WhatsApp</a>
+<a class="btn-home" href="/">← Volver al inicio</a>
+
+<script>
+  var WA_NUMBER = "5491166140749";
+
+  // Leer parámetros que MP devuelve en la URL
+  var params = new URLSearchParams(window.location.search);
+  var extRef     = params.get("external_reference") || "";
+  var paymentId  = params.get("payment_id") || "";
+  var status     = params.get("status") || "";
+
+  // Parsear external_reference: "courtId|date|slot|timestamp"
+  var parts     = extRef.split("|");
+  var courtId   = parts[0] || "";
+  var date      = parts[1] || "";
+  var slot      = parts[2] || "";
+
+  // Datos guardados en localStorage cuando el cliente eligió el turno
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem("reserva_pendiente") || "{}"); } catch(e){}
+
+  var courtName = saved.courtName || "Cancha " + courtId;
+  var name      = saved.name      || "—";
+  var half      = saved.halfPrice || 0;
+  var full      = saved.fullPrice || 0;
+
+  // Formatear fecha
+  function formatDate(d) {
+    if (!d) return "—";
+    var p = d.split("-");
+    if (p.length < 3) return d;
+    var dias = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+    var dt = new Date(Number(p[0]), Number(p[1])-1, Number(p[2]));
+    return dias[dt.getDay()] + " " + p[2] + "/" + p[1] + "/" + p[0];
+  }
+
+  // Rellenar detalle
+  document.getElementById("d-cancha").textContent  = courtName;
+  document.getElementById("d-fecha").textContent   = formatDate(date);
+  document.getElementById("d-slot").textContent    = slot ? slot + " hs" : "—";
+  document.getElementById("d-nombre").textContent  = name;
+  document.getElementById("d-monto").textContent   = half ? "$" + Number(half).toLocaleString("es-AR") : "—";
+  document.getElementById("d-resto").textContent   = full && half ? "$" + (Number(full) - Number(half)).toLocaleString("es-AR") : "—";
+
+  // Armar mensaje de WhatsApp
+  var msg = "Hola! Acabo de confirmar una reserva en CanCha5:\n"
+    + "Cancha: " + courtName + "\n"
+    + "Fecha: " + formatDate(date) + "\n"
+    + "Turno: " + slot + " hs\n"
+    + "A nombre de: " + name + "\n"
+    + "Pago MP #" + paymentId + " — CONFIRMADO ✅\n"
+    + "Seña abonada: $" + Number(half).toLocaleString("es-AR");
+
+  var waUrl = "https://wa.me/" + WA_NUMBER + "?text=" + encodeURIComponent(msg);
+  document.getElementById("wa-btn").href = waUrl;
+
+  // Countdown y redirect automático a WA
+  var secs = 5;
+  var timerEl = document.getElementById("timer");
+  var interval = setInterval(function() {
+    secs--;
+    timerEl.textContent = secs;
+    if (secs <= 0) {
+      clearInterval(interval);
+      window.open(waUrl, "_blank");
+    }
+  }, 1000);
+
+  // Limpiar localStorage
+  localStorage.removeItem("reserva_pendiente");
+</script>
+</body>
+</html>
