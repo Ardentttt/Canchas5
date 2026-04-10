@@ -334,6 +334,17 @@ async function pagarConMP(){
     var data=await r.json();
     document.getElementById("loading").classList.remove("open");
     if(data.init_point){
+      // Guardar datos en localStorage para mostrarlos en success.html
+      localStorage.setItem("reserva_pendiente", JSON.stringify({
+        courtName: selCourt.name,
+        courtId:   selCourt.id,
+        date:      selDate,
+        slot:      selSlot,
+        name:      name,
+        phone:     phone,
+        halfPrice: half,
+        fullPrice: selCourt.price
+      }));
       // Redirigir a Mercado Pago
       window.location.href=data.init_point;
     } else {
