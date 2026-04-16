@@ -1,7 +1,3 @@
-// api/webhook.js
-// Mercado Pago llama a este endpoint automáticamente cuando se confirma un pago.
-// Actualiza el estado en Google Sheets a CONFIRMADA.
-
 const { MercadoPagoConfig, Payment } = require("mercadopago");
 const { google } = require("googleapis");
 
@@ -9,77 +5,74 @@ const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SA_EMAIL = process.env.GOOGLE_SA_EMAIL;
 const GOOGLE_SA_KEY   = process.env.GOOGLE_SA_KEY;
-const WA_NUMBER       = process.env.WA_NUMBER || "5491166140749";
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") return res.status(200).end();
-
-  // MP envía GET para validar la URL
-  if (req.method === "GET") return res.status(200).send("OK");
-
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method === "GET")     return res.status(200).send("OK");
+  if (req.method !== "POST")    return res.status(405).end();
 
   try {
     const { type, data } = req.body;
+    if (!data?.id) return res.status(200).json({ received: true });
 
-    // Solo procesar notificaciones de pago
-    if (type !== "payment" || !data?.id) {
-      return res.status(200).json({ received: true });
-    }
-
-    // ── Consultar el pago a MP ──
     const client  = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
     const payment = new Payment(client);
     const pago    = await payment.get({ id: data.id });
 
-    const estado  = pago.status;          // "approved", "pending", "rejected"
-    const meta    = pago.metadata || {};
-    const extRef  = pago.external_reference || "";
+    const estado = pago.status;
+    const extRef = pago.external_reference || "";
 
     console.log("Webhook pago:", data.id, "estado:", estado, "ref:", extRef);
 
     if (estado === "approved") {
-      // ── Actualizar Sheet a CONFIRMADA ──
-      await actualizarEstado(extRef, "CONFIRMADA", pago.id);
-      console.log("Reserva CONFIRMADA:", extRef);
-
+      await actualizarEstado(extRef, "CONFIRMADA", data.id);
     } else if (estado === "rejected" || estado === "cancelled") {
-      await actualizarEstado(extRef, "CANCELADA", pago.id);
-      console.log("Reserva CANCELADA:", extRef);
-
+      await actualizarEstado(extRef, "CANCELADA", data.id);
     } else {
-      // pending, in_process, etc.
-      await actualizarEstado(extRef, "PENDIENTE", pago.id);
+      await actualizarEstado(extRef, "PENDIENTE", data.id);
     }
 
     return res.status(200).json({ received: true });
-
   } catch (err) {
-    console.error("Error en webhook:", err);
+    console.error("Error webhook:", err);
     return res.status(500).json({ error: err.message });
   }
 };
 
-// ── Busca la fila por external_reference y actualiza el estado ──
 async function actualizarEstado(extRef, nuevoEstado, pagoId) {
   const sheets = await getSheetsClient();
-
-  // Leer todas las filas
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: "Reservas!A2:L1000"
   });
   const rows = response.data.values || [];
 
-  // Buscar por referencia externa (columna A = ID, columna L = notas con pref MP)
-  for (let i = 0; i < rows.length; i++) {
-    const notaCol = rows[i][11] || "";
-    // La nota tiene "Pref MP: XXX" — buscamos por extRef que también contiene el prefId
-    if (notaCol.includes(extRef.split("|")[3]) || rows[i][0] === extRef) {
-      const rowNum = i + 2; // +2 porque empezamos en fila 2
+  // extRef = "courtId|date|slot|timestamp"
+  // La nota en columna L tiene "Pref MP: prefId"
+  // Buscamos por courtId+date+slot que están en columnas D, E, F
+  const parts   = extRef.split("|");
+  const courtId = parts[0] || "";
+  const date    = parts[1] || "";
+  const slot    = parts[2] || "";
 
-      // Actualizar estado (columna K = 11)
+  for (let i = 0; i < rows.length; i++) {
+    const row      = rows[i];
+    const rCourt   = String(row[3] || "");
+    const rDate    = String(row[4] || "");
+    const rSlot    = String(row[5] || "");
+    const rEstado  = String(row[10] || "");
+
+    // Buscar por cancha + fecha + slot que no estén ya CONFIRMADA/CANCELADA
+    if (
+      rCourt === courtId &&
+      rDate  === date    &&
+      rSlot  === slot    &&
+      rEstado !== "CONFIRMADA" &&
+      rEstado !== "CANCELADA"
+    ) {
+      const rowNum = i + 2;
+
       await sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SHEET_ID,
         range: `Reservas!K${rowNum}`,
@@ -87,25 +80,21 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
         requestBody: { values: [[nuevoEstado]] }
       });
 
-      // Actualizar notas con el ID del pago (columna L = 12)
       await sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SHEET_ID,
         range: `Reservas!L${rowNum}`,
         valueInputOption: "USER_ENTERED",
-        requestBody: { values: [["Pago MP #" + pagoId + " – " + nuevoEstado]] }
+        requestBody: { values: [["Pago MP #" + pagoId + " — " + nuevoEstado]] }
       });
 
-      console.log("Sheet actualizado fila", rowNum, "→", nuevoEstado);
+      console.log("Sheet actualizado fila", rowNum, "->", nuevoEstado);
       break;
     }
   }
 }
 
 async function getSheetsClient() {
-  const key = GOOGLE_SA_KEY
-    .replace(/\\n/g, "\n")
-    .replace(/\r\n/g, "\n")
-    .trim();
+  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").trim();
   const auth = new google.auth.GoogleAuth({
     credentials: {
       client_email: GOOGLE_SA_EMAIL,

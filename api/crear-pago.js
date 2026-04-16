@@ -146,10 +146,7 @@ async function registrarEnSheet(data) {
 
 // ── Cliente autenticado de Google Sheets ──
 async function getSheetsClient() {
-  const key = GOOGLE_SA_KEY
-    .replace(/\\n/g, "\n")
-    .replace(/\r\n/g, "\n")
-    .trim();
+  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").trim();
   const auth = new google.auth.GoogleAuth({
     credentials: {
       client_email: GOOGLE_SA_EMAIL,
