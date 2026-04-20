@@ -1,6 +1,4 @@
 // api/ocupados.js
-// Devuelve turnos ocupados. Borra filas RESERVANDO expiradas (sin rastro en el Sheet).
-
 const { google } = require("googleapis");
 
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
@@ -28,7 +26,7 @@ module.exports = async function handler(req, res) {
     const rows   = response.data.values || [];
     const ahora  = Date.now();
     const result = {};
-    const aBorrar = []; // índices 0-based (fila 2 del sheet = índice 1)
+    const aBorrar = []; // índices 0-based de la API de Sheets (fila 2 del sheet = índice 1)
 
     for (let i = 0; i < rows.length; i++) {
       const row      = rows[i];
@@ -36,15 +34,23 @@ module.exports = async function handler(req, res) {
       const rDate    = row[4]  || "";
       const rSlot    = row[5]  || "";
       const rEstado  = row[10] || "";
-      const rTs      = row[12] || ""; // columna M: timestamp de inicio de reserva
+      const rTs      = row[12] || "";
 
-      // RESERVANDO expirada → borrar, no bloquear el turno
+      // Solo borrar RESERVANDO si realmente pasaron los 10 minutos
       if (rEstado === "RESERVANDO" && rTs) {
         const edad = ahora - new Date(rTs).getTime();
+        console.log("RESERVANDO encontrada, edad (ms):", edad, "limite:", EXPIRACION_MS, "expirada:", edad > EXPIRACION_MS);
         if (edad > EXPIRACION_MS) {
-          aBorrar.push(i + 1); // i+1 porque fila 1 es header (0-based)
+          // i=0 corresponde a fila 2 del sheet → startIndex=1 en la API (0-based, row 0 = header)
+          aBorrar.push(i + 1);
           continue;
         }
+        // No expirada → bloquear el turno
+        if (rCourtId === String(courtId)) {
+          const key   = rDate + "|" + rSlot;
+          result[key] = "pending";
+        }
+        continue;
       }
 
       if (rCourtId === String(courtId) && rEstado !== "CANCELADA") {
@@ -53,8 +59,8 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Borrar filas expiradas en background — no bloqueamos la respuesta
     if (aBorrar.length > 0) {
+      console.log("Borrando filas expiradas (índices 0-based):", aBorrar);
       borrarFilas(sheets, sheetName, aBorrar).catch(console.error);
     }
 
@@ -65,14 +71,13 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// Borra filas del Sheet de abajo hacia arriba para no desplazar índices
 async function borrarFilas(sheets, sheetName, rowIndexes) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   const hoja = meta.data.sheets.find(function(s) { return s.properties.title === sheetName; });
   if (!hoja) return;
   const sheetId = hoja.properties.sheetId;
 
-  // Ordenar de mayor a menor
+  // Ordenar de mayor a menor para no desplazar índices al borrar
   const sorted = rowIndexes.slice().sort(function(a, b) { return b - a; });
 
   const requests = sorted.map(function(rowIndex) {
@@ -92,7 +97,7 @@ async function borrarFilas(sheets, sheetName, rowIndexes) {
     spreadsheetId: GOOGLE_SHEET_ID,
     requestBody: { requests }
   });
-  console.log("Filas expiradas borradas:", sorted);
+  console.log("Filas expiradas borradas OK:", sorted);
 }
 
 async function getSheetName(sheets) {
