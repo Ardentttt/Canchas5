@@ -1,3 +1,4 @@
+// api/webhook.js
 const { MercadoPagoConfig, Payment } = require("mercadopago");
 const { google } = require("googleapis");
 
@@ -41,29 +42,27 @@ module.exports = async function handler(req, res) {
 };
 
 async function actualizarEstado(extRef, nuevoEstado, pagoId) {
-  const sheets = await getSheetsClient();
+  const sheets    = await getSheetsClient();
+  const sheetName = await getSheetName(sheets);
+
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
-    range: "Reservas!A2:L1000"
+    range: sheetName + "!A2:M1000"
   });
   const rows = response.data.values || [];
 
-  // extRef = "courtId|date|slot|timestamp"
-  // La nota en columna L tiene "Pref MP: prefId"
-  // Buscamos por courtId+date+slot que están en columnas D, E, F
   const parts   = extRef.split("|");
   const courtId = parts[0] || "";
   const date    = parts[1] || "";
   const slot    = parts[2] || "";
 
   for (let i = 0; i < rows.length; i++) {
-    const row      = rows[i];
-    const rCourt   = String(row[3] || "");
-    const rDate    = String(row[4] || "");
-    const rSlot    = String(row[5] || "");
-    const rEstado  = String(row[10] || "");
+    const row     = rows[i];
+    const rCourt  = String(row[3] || "");
+    const rDate   = String(row[4] || "");
+    const rSlot   = String(row[5] || "");
+    const rEstado = String(row[10] || "");
 
-    // Buscar por cancha + fecha + slot que no estén ya CONFIRMADA/CANCELADA
     if (
       rCourt === courtId &&
       rDate  === date    &&
@@ -75,14 +74,14 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
 
       await sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SHEET_ID,
-        range: `Reservas!K${rowNum}`,
+        range: sheetName + "!K" + rowNum,
         valueInputOption: "USER_ENTERED",
         requestBody: { values: [[nuevoEstado]] }
       });
 
       await sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SHEET_ID,
-        range: `Reservas!L${rowNum}`,
+        range: sheetName + "!L" + rowNum,
         valueInputOption: "USER_ENTERED",
         requestBody: { values: [["Pago MP #" + pagoId + " — " + nuevoEstado]] }
       });
@@ -90,6 +89,19 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
       console.log("Sheet actualizado fila", rowNum, "->", nuevoEstado);
       break;
     }
+  }
+}
+
+async function getSheetName(sheets) {
+  try {
+    const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+    const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
+    const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
+    if (semanas.length > 0) return semanas[semanas.length - 1];
+    if (hojas.includes("Reservas")) return "Reservas";
+    return hojas[0];
+  } catch (e) {
+    return "Reservas";
   }
 }
 
