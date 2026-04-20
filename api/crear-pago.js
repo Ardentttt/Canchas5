@@ -63,22 +63,22 @@ module.exports = async function handler(req, res) {
     const reservaId = "R" + Date.now().toString().slice(-7);
     const now       = new Date().toISOString();
 
-    console.log("Guardando en hoja:", sheetName, "fila con courtId:", courtId, "date:", date, "slot:", slot);
-
+    // IMPORTANTE: guardamos date con apóstrofe para que Sheets no lo convierta a formato fecha
+    // Así el webhook puede comparar "2026-04-20" === "2026-04-20" sin problemas
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEET_ID,
       range: sheetName + "!A:M",
-      valueInputOption: "USER_ENTERED",
+      valueInputOption: "RAW",  // RAW = sin interpretar, guarda texto exacto
       requestBody: {
         values: [[
           reservaId,
           now,
           courtName,
-          courtId,
-          date,
+          String(courtId),
+          date,        // se guarda como texto exacto gracias a RAW
           slot,
           name,
-          phone,
+          String(phone),
           fullPrice,
           halfPrice,
           "RESERVANDO",
@@ -88,7 +88,7 @@ module.exports = async function handler(req, res) {
       }
     });
 
-    console.log("Fila RESERVANDO guardada OK en:", sheetName);
+    console.log("Fila RESERVANDO guardada OK en:", sheetName, "date:", date, "slot:", slot);
 
     return res.status(200).json({
       init_point:    mpResponse.init_point,
@@ -140,7 +140,6 @@ async function getSheetName(sheets) {
     const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
     console.log("Hojas disponibles:", JSON.stringify(hojas));
     const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
-    console.log("Semanas encontradas:", JSON.stringify(semanas));
     if (semanas.length > 0) return semanas[semanas.length - 1];
     if (hojas.includes("Reservas")) return "Reservas";
     return hojas[0];
