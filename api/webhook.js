@@ -52,13 +52,13 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
     range: sheetName + "!A2:M1000"
   });
   const rows = response.data.values || [];
-  console.log("Total filas encontradas:", rows.length);
+  console.log("Total filas en sheet:", rows.length);
 
   const parts   = extRef.split("|");
   const courtId = parts[0] || "";
   const date    = parts[1] || "";
   const slot    = parts[2] || "";
-  console.log("Buscando courtId:", courtId, "date:", date, "slot:", slot);
+  console.log("Buscando -> courtId:[" + courtId + "] date:[" + date + "] slot:[" + slot + "]");
 
   for (let i = 0; i < rows.length; i++) {
     const row     = rows[i];
@@ -66,8 +66,7 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
     const rDate   = String(row[4] || "");
     const rSlot   = String(row[5] || "");
     const rEstado = String(row[10] || "");
-
-    console.log("Fila", i+2, "-> court:", rCourt, "date:", rDate, "slot:", rSlot, "estado:", rEstado);
+    console.log("Fila " + (i+2) + " -> court:[" + rCourt + "] date:[" + rDate + "] slot:[" + rSlot + "] estado:[" + rEstado + "]");
 
     if (
       rCourt === courtId &&
@@ -77,21 +76,18 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
       rEstado !== "CANCELADA"
     ) {
       const rowNum = i + 2;
-
       await sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SHEET_ID,
         range: sheetName + "!K" + rowNum,
         valueInputOption: "USER_ENTERED",
         requestBody: { values: [[nuevoEstado]] }
       });
-
       await sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SHEET_ID,
         range: sheetName + "!L" + rowNum,
         valueInputOption: "USER_ENTERED",
         requestBody: { values: [["Pago MP #" + pagoId + " — " + nuevoEstado]] }
       });
-
       console.log("Sheet actualizado fila", rowNum, "->", nuevoEstado);
       return;
     }
@@ -105,7 +101,6 @@ async function getSheetName(sheets) {
     const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
     console.log("Hojas disponibles:", JSON.stringify(hojas));
     const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
-    console.log("Semanas encontradas:", JSON.stringify(semanas));
     if (semanas.length > 0) return semanas[semanas.length - 1];
     if (hojas.includes("Reservas")) return "Reservas";
     return hojas[0];
