@@ -104,6 +104,24 @@
     footer{padding:1.8rem 5vw;border-top:1px solid var(--border);text-align:center;font-size:.8rem;color:var(--muted)}
     footer strong{color:var(--green)}
     @media(max-width:480px){.hero h1{font-size:2.8rem}nav a{margin-left:.9rem;font-size:.8rem}}
+    /* COUNTDOWN MODAL */
+    .cd-overlay{position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.92);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:1rem}
+    .cd-overlay.open{display:flex}
+    .cd-box{background:var(--card);border:1px solid rgba(0,232,122,.3);border-radius:22px;width:100%;max-width:420px;padding:2.2rem;text-align:center;animation:up .28s ease}
+    .cd-icon{font-size:3rem;margin-bottom:.8rem}
+    .cd-box h3{font-family:'Barlow Condensed',sans-serif;font-size:1.6rem;font-weight:800;color:var(--white);margin-bottom:.4rem}
+    .cd-box p{font-size:.88rem;color:var(--muted);line-height:1.55;margin-bottom:1.4rem}
+    .cd-timer{font-family:'Barlow Condensed',sans-serif;font-size:4rem;font-weight:900;color:var(--green);letter-spacing:2px;margin:.6rem 0}
+    .cd-timer.urgent{color:var(--danger);animation:pulse 1s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    .cd-label{font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:1.6rem}
+    .cd-info{background:rgba(0,232,122,.05);border:1px solid rgba(0,232,122,.15);border-radius:11px;padding:1rem;margin-bottom:1.4rem}
+    .cd-info-row{display:flex;justify-content:space-between;font-size:.86rem;margin-bottom:.3rem}
+    .cd-info-row:last-child{margin-bottom:0;color:var(--accent);font-weight:600}
+    .cd-info-row span:first-child{color:var(--muted)}
+    .cd-info-row span:last-child{color:var(--white)}
+    .btn-cancel-cd{width:100%;padding:.7rem;background:transparent;border:1px solid var(--border);border-radius:9px;color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:.95rem;cursor:pointer;transition:all .2s}
+    .btn-cancel-cd:hover{border-color:var(--danger);color:var(--danger)}
   </style>
 </head>
 <body>
@@ -190,6 +208,19 @@
 <div class="loading-ov" id="loading">
   <div class="spinner"></div>
   <p>Generando link de pago…</p>
+</div>
+
+<!-- COUNTDOWN MODAL (reserva temporal 10 min) -->
+<div class="cd-overlay" id="cd-overlay">
+  <div class="cd-box">
+    <div class="cd-icon">⏳</div>
+    <h3>Turno reservado</h3>
+    <p>Tenés <strong style="color:var(--green)">10 minutos</strong> para completar el pago.<br>Pasado ese tiempo el turno vuelve a estar disponible.</p>
+    <div class="cd-timer" id="cd-timer">10:00</div>
+    <div class="cd-label">tiempo restante</div>
+    <div class="cd-info" id="cd-info"></div>
+    <button class="btn-cancel-cd" onclick="cancelarReservaTemp()">✕ Cancelar y volver</button>
+  </div>
 </div>
 
 <footer>
@@ -334,7 +365,6 @@ async function pagarConMP(){
     var data=await r.json();
     document.getElementById("loading").classList.remove("open");
     if(data.init_point){
-      // Guardar datos en localStorage para mostrarlos en success.html
       localStorage.setItem("reserva_pendiente", JSON.stringify({
         courtName: selCourt.name,
         courtId:   selCourt.id,
@@ -345,8 +375,17 @@ async function pagarConMP(){
         halfPrice: half,
         fullPrice: selCourt.price
       }));
-      // Redirigir a Mercado Pago
-      window.location.href=data.init_point;
+
+      // Cerrar modal de reserva y mostrar countdown
+      document.getElementById("overlay").classList.remove("open");
+      mostrarCountdown(data.expires_at, data.init_point, {
+        courtName: selCourt.name,
+        date: selDate,
+        slot: selSlot,
+        name: name,
+        half: half,
+        full: selCourt.price
+      });
     } else {
       alert("Error: "+(data.error||"No se pudo generar el link de pago."));
       document.getElementById("btn-mp").disabled=false;
@@ -356,6 +395,73 @@ async function pagarConMP(){
     alert("Error de conexión. Intentá de nuevo.");
     document.getElementById("btn-mp").disabled=false;
   }
+}
+
+var _cdInterval = null;
+var _cdInitPoint = null;
+
+function mostrarCountdown(expiresAt, initPoint, info){
+  _cdInitPoint = initPoint;
+  document.getElementById("cd-overlay").classList.add("open");
+
+  // Llenar info del turno
+  var dias=["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+  var dt=localDate(info.date);
+  var fechaStr=dias[dt.getDay()]+" "+dt.getDate()+"/"+String(dt.getMonth()+1).padStart(2,"0");
+  document.getElementById("cd-info").innerHTML=
+    '<div class="cd-info-row"><span>Cancha</span><span>'+info.courtName+'</span></div>'+
+    '<div class="cd-info-row"><span>Fecha</span><span>'+fechaStr+'</span></div>'+
+    '<div class="cd-info-row"><span>Turno</span><span>'+info.slot+' hs</span></div>'+
+    '<div class="cd-info-row"><span>Nombre</span><span>'+info.name+'</span></div>'+
+    '<div class="cd-info-row"><span>⚡ Seña a pagar</span><span>$'+info.half.toLocaleString("es-AR")+'</span></div>';
+
+  if(_cdInterval) clearInterval(_cdInterval);
+
+  function tick(){
+    var left=expiresAt-Date.now();
+    if(left<=0){
+      clearInterval(_cdInterval);
+      document.getElementById("cd-timer").textContent="00:00";
+      // Tiempo expirado — ir igual a MP (la API ya marcó como EXPIRADA)
+      setTimeout(function(){ window.location.href=_cdInitPoint; }, 1500);
+      return;
+    }
+    var mins=Math.floor(left/60000);
+    var secs=Math.floor((left%60000)/1000);
+    var str=(mins<10?"0":"")+mins+":"+(secs<10?"0":"")+secs;
+    var el=document.getElementById("cd-timer");
+    el.textContent=str;
+    el.className="cd-timer"+(left<120000?" urgent":""); // rojo últimos 2 min
+  }
+
+  tick();
+  _cdInterval=setInterval(tick,500);
+
+  // Redirigir a MP cuando el usuario toca la pantalla/timer (o auto a los 3s)
+  document.getElementById("cd-overlay").onclick=function(e){
+    if(e.target===e.currentTarget||e.target.id==="cd-timer"){
+      irAMP();
+    }
+  };
+
+  // Auto-redirigir a los 3 segundos para que el usuario vea el countdown
+  setTimeout(function(){ irAMP(); }, 3000);
+}
+
+function irAMP(){
+  if(!_cdInitPoint) return;
+  clearInterval(_cdInterval);
+  window.location.href=_cdInitPoint;
+}
+
+function cancelarReservaTemp(){
+  clearInterval(_cdInterval);
+  _cdInitPoint=null;
+  document.getElementById("cd-overlay").classList.remove("open");
+  // Reabrir modal de reserva
+  loadOccupied(selCourt.id);
+  document.getElementById("overlay").classList.add("open");
+  document.getElementById("btn-mp").disabled=false;
 }
 
 document.getElementById("overlay").addEventListener("click",function(e){if(e.target===e.currentTarget)closeModal();});
