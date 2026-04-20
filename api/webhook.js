@@ -45,16 +45,20 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
   const sheets    = await getSheetsClient();
   const sheetName = await getSheetName(sheets);
 
+  console.log("Buscando en hoja:", sheetName);
+
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: sheetName + "!A2:M1000"
   });
   const rows = response.data.values || [];
+  console.log("Total filas encontradas:", rows.length);
 
   const parts   = extRef.split("|");
   const courtId = parts[0] || "";
   const date    = parts[1] || "";
   const slot    = parts[2] || "";
+  console.log("Buscando courtId:", courtId, "date:", date, "slot:", slot);
 
   for (let i = 0; i < rows.length; i++) {
     const row     = rows[i];
@@ -62,6 +66,8 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
     const rDate   = String(row[4] || "");
     const rSlot   = String(row[5] || "");
     const rEstado = String(row[10] || "");
+
+    console.log("Fila", i+2, "-> court:", rCourt, "date:", rDate, "slot:", rSlot, "estado:", rEstado);
 
     if (
       rCourt === courtId &&
@@ -87,20 +93,24 @@ async function actualizarEstado(extRef, nuevoEstado, pagoId) {
       });
 
       console.log("Sheet actualizado fila", rowNum, "->", nuevoEstado);
-      break;
+      return;
     }
   }
+  console.log("ADVERTENCIA: No se encontro fila para actualizar");
 }
 
 async function getSheetName(sheets) {
   try {
     const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
     const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
+    console.log("Hojas disponibles:", JSON.stringify(hojas));
     const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
+    console.log("Semanas encontradas:", JSON.stringify(semanas));
     if (semanas.length > 0) return semanas[semanas.length - 1];
     if (hojas.includes("Reservas")) return "Reservas";
     return hojas[0];
   } catch (e) {
+    console.log("Error getSheetName:", e.message);
     return "Reservas";
   }
 }
