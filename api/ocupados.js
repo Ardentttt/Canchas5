@@ -1,6 +1,5 @@
 // api/ocupados.js
-// Devuelve los turnos ocupados de una cancha desde Google Sheets.
-// También limpia reservas RESERVANDO con más de 10 minutos (expiradas).
+// Devuelve turnos ocupados. Borra filas RESERVANDO expiradas (sin rastro en el Sheet).
 
 const { google } = require("googleapis");
 
@@ -18,19 +17,18 @@ module.exports = async function handler(req, res) {
   if (!courtId) return res.status(400).json({ error: "Falta courtId" });
 
   try {
-    const sheets     = await getSheetsClient();
-    const sheetName  = await getSheetName(sheets);
-    const range      = sheetName + "!A2:M1000";
+    const sheets    = await getSheetsClient();
+    const sheetName = await getSheetName(sheets);
 
-    const response   = await sheets.spreadsheets.values.get({
+    const response  = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range
+      range: sheetName + "!A2:M1000"
     });
 
-    const rows    = response.data.values || [];
-    const ahora   = Date.now();
-    const result  = {};
-    const updates = []; // filas a marcar como EXPIRADA
+    const rows   = response.data.values || [];
+    const ahora  = Date.now();
+    const result = {};
+    const aBorrar = []; // índices 0-based (fila 2 del sheet = índice 1)
 
     for (let i = 0; i < rows.length; i++) {
       const row      = rows[i];
@@ -38,26 +36,26 @@ module.exports = async function handler(req, res) {
       const rDate    = row[4]  || "";
       const rSlot    = row[5]  || "";
       const rEstado  = row[10] || "";
-      const rTs      = row[12] || ""; // columna M: timestamp ISO de cuando se reservó
+      const rTs      = row[12] || ""; // columna M: timestamp de inicio de reserva
 
-      // Limpiar reservas temporales expiradas
+      // RESERVANDO expirada → borrar, no bloquear el turno
       if (rEstado === "RESERVANDO" && rTs) {
         const edad = ahora - new Date(rTs).getTime();
         if (edad > EXPIRACION_MS) {
-          updates.push(i + 2); // número de fila en Sheet (1-indexed + header)
-          continue; // no la incluimos como ocupada
+          aBorrar.push(i + 1); // i+1 porque fila 1 es header (0-based)
+          continue;
         }
       }
 
-      if (rCourtId === String(courtId) && rEstado !== "CANCELADA" && rEstado !== "EXPIRADA") {
+      if (rCourtId === String(courtId) && rEstado !== "CANCELADA") {
         const key   = rDate + "|" + rSlot;
         result[key] = rEstado === "CONFIRMADA" ? "confirmed" : "pending";
       }
     }
 
-    // Marcar expiradas en background (no bloqueamos la respuesta)
-    if (updates.length > 0) {
-      marcarExpiradas(sheets, sheetName, updates).catch(console.error);
+    // Borrar filas expiradas en background — no bloqueamos la respuesta
+    if (aBorrar.length > 0) {
+      borrarFilas(sheets, sheetName, aBorrar).catch(console.error);
     }
 
     return res.status(200).json(result);
@@ -67,32 +65,42 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// Marca filas como EXPIRADA en la columna K
-async function marcarExpiradas(sheets, sheetName, rowNums) {
-  const data = rowNums.map(function(rowNum) {
+// Borra filas del Sheet de abajo hacia arriba para no desplazar índices
+async function borrarFilas(sheets, sheetName, rowIndexes) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+  const hoja = meta.data.sheets.find(function(s) { return s.properties.title === sheetName; });
+  if (!hoja) return;
+  const sheetId = hoja.properties.sheetId;
+
+  // Ordenar de mayor a menor
+  const sorted = rowIndexes.slice().sort(function(a, b) { return b - a; });
+
+  const requests = sorted.map(function(rowIndex) {
     return {
-      range: sheetName + "!K" + rowNum,
-      values: [["EXPIRADA"]]
+      deleteDimension: {
+        range: {
+          sheetId,
+          dimension: "ROWS",
+          startIndex: rowIndex,
+          endIndex:   rowIndex + 1
+        }
+      }
     };
   });
-  await sheets.spreadsheets.values.batchUpdate({
+
+  await sheets.spreadsheets.batchUpdate({
     spreadsheetId: GOOGLE_SHEET_ID,
-    requestBody: {
-      valueInputOption: "USER_ENTERED",
-      data
-    }
+    requestBody: { requests }
   });
+  console.log("Filas expiradas borradas:", sorted);
 }
 
-// Obtiene el nombre de la hoja activa (la más reciente que empiece con "Semana")
 async function getSheetName(sheets) {
   try {
-    const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-    const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
-    // Busca hojas que empiecen con "Semana", toma la última
+    const meta    = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+    const hojas   = meta.data.sheets.map(function(s) { return s.properties.title; });
     const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
     if (semanas.length > 0) return semanas[semanas.length - 1];
-    // Fallback a "Reservas" si no hay hojas de semana
     if (hojas.includes("Reservas")) return "Reservas";
     return hojas[0];
   } catch (e) {
