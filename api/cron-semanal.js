@@ -1,7 +1,7 @@
 // api/cron-semanal.js
-// Crea una nueva hoja "Semana X" cada domingo a las 3am (Argentina = UTC-3).
-// Mantiene un máximo de 4 semanas; si hay 5, borra la más vieja.
-// Disparado por Vercel Cron Jobs (ver vercel.json).
+// Ahora hace rotación MENSUAL, no semanal.
+// El 1ro de cada mes a las 3am Argentina crea una hoja nueva "Mes YYYY-MM"
+// y borra la del mes anterior. Solo mantiene 1 mes activo + 1 de historial (2 total).
 
 const { google } = require("googleapis");
 
@@ -15,20 +15,8 @@ const HEADERS = [
   "Precio Total", "Seña 50%", "Estado", "Notas", "Timestamp"
 ];
 
-const MAX_SEMANAS = 4;
-
 module.exports = async function handler(req, res) {
-  // Solo permitir GET (Vercel Cron usa GET)
   if (req.method !== "GET") return res.status(405).end();
-
-  // Verificar que sea domingo 3am en Argentina (UTC-3)
-  // Vercel Cron garantiza el horario, pero validamos igual
-  const ahora = new Date();
-  const horaAR = (ahora.getUTCHours() - 3 + 24) % 24;
-  const diaUTC = ahora.getUTCDay(); // 0 = domingo
-  const diaAR  = horaAR < 0 ? (diaUTC + 6) % 7 : diaUTC; // ajuste por timezone
-
-  console.log("Cron ejecutado. Hora AR:", horaAR, "Día AR:", diaAR);
 
   try {
     const sheets = await getSheetsClient();
@@ -36,46 +24,43 @@ module.exports = async function handler(req, res) {
     const hojas  = meta.data.sheets;
     const titles = hojas.map(function(s) { return s.properties.title; });
 
-    // Encontrar semanas existentes
-    const semanas = titles
-      .filter(function(t) { return t.startsWith("Semana"); })
-      .sort(function(a, b) {
-        return numDeSemana(a) - numDeSemana(b);
-      });
+    // Nombre de la hoja para el mes actual
+    const ahora    = new Date();
+    const year     = ahora.getFullYear();
+    const mes      = String(ahora.getMonth() + 1).padStart(2, "0");
+    const nombreNuevo = "Mes " + year + "-" + mes;
 
-    // Determinar número de la nueva semana
-    const ultimoNum = semanas.length > 0
-      ? numDeSemana(semanas[semanas.length - 1])
-      : 0;
-    const nuevoNum  = ultimoNum + 1;
-    const nuevoNombre = "Semana " + nuevoNum;
+    // Si ya existe la hoja de este mes, no hacer nada
+    if (titles.includes(nombreNuevo)) {
+      return res.status(200).json({ ok: true, mensaje: "Hoja del mes ya existe: " + nombreNuevo });
+    }
 
-    // Crear la nueva hoja
-    const addRequest = {
-      addSheet: {
-        properties: {
-          title: nuevoNombre,
-          gridProperties: { rowCount: 1000, columnCount: 13 }
-        }
-      }
-    };
-
+    // Crear nueva hoja del mes
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: GOOGLE_SHEET_ID,
-      requestBody: { requests: [addRequest] }
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: nombreNuevo,
+              gridProperties: { rowCount: 1000, columnCount: 13 }
+            }
+          }
+        }]
+      }
     });
 
-    // Agregar headers a la nueva hoja
+    // Agregar headers
     await sheets.spreadsheets.values.update({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range: nuevoNombre + "!A1:M1",
-      valueInputOption: "USER_ENTERED",
+      range: nombreNuevo + "!A1:M1",
+      valueInputOption: "RAW",
       requestBody: { values: [HEADERS] }
     });
 
-    // Formatear header (negrita + fondo oscuro)
-    const metaNew   = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-    const hojaNew   = metaNew.data.sheets.find(function(s) { return s.properties.title === nuevoNombre; });
+    // Formatear header
+    const metaNew  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+    const hojaNew  = metaNew.data.sheets.find(function(s) { return s.properties.title === nombreNuevo; });
     const sheetIdNew = hojaNew.properties.sheetId;
 
     await sheets.spreadsheets.batchUpdate({
@@ -94,13 +79,9 @@ module.exports = async function handler(req, res) {
               fields: "userEnteredFormat(backgroundColor,textFormat)"
             }
           },
-          // Congelar primera fila
           {
             updateSheetProperties: {
-              properties: {
-                sheetId: sheetIdNew,
-                gridProperties: { frozenRowCount: 1 }
-              },
+              properties: { sheetId: sheetIdNew, gridProperties: { frozenRowCount: 1 } },
               fields: "gridProperties.frozenRowCount"
             }
           }
@@ -108,52 +89,56 @@ module.exports = async function handler(req, res) {
       }
     });
 
-    console.log("Hoja creada:", nuevoNombre);
+    console.log("Hoja creada:", nombreNuevo);
 
-    // Si hay más de MAX_SEMANAS, borrar la más vieja
-    let borrada = null;
-    if (semanas.length >= MAX_SEMANAS) {
-      const masVieja    = semanas[0];
-      const sheetVieja  = hojas.find(function(s) { return s.properties.title === masVieja; });
-      if (sheetVieja) {
-        await sheets.spreadsheets.batchUpdate({
-          spreadsheetId: GOOGLE_SHEET_ID,
-          requestBody: {
-            requests: [{
-              deleteSheet: { sheetId: sheetVieja.properties.sheetId }
-            }]
-          }
-        });
-        borrada = masVieja;
-        console.log("Hoja borrada:", masVieja);
-      }
+    // Borrar hojas viejas — conservar solo el mes actual y el anterior
+    const metaFinal  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+    const hojasFinal = metaFinal.data.sheets;
+    const meses = hojasFinal
+      .filter(function(s) { return s.properties.title.startsWith("Mes "); })
+      .sort(function(a, b) { return a.properties.title.localeCompare(b.properties.title); });
+
+    // También borrar hojas "Semana X" viejas si quedaron
+    const semanas = hojasFinal.filter(function(s) { return s.properties.title.startsWith("Semana"); });
+
+    const aBorrar = [];
+
+    // Conservar solo los últimos 2 meses
+    if (meses.length > 2) {
+      const viejas = meses.slice(0, meses.length - 2);
+      viejas.forEach(function(h) { aBorrar.push(h.properties.sheetId); });
+    }
+
+    // Borrar todas las hojas "Semana X" viejas
+    semanas.forEach(function(h) { aBorrar.push(h.properties.sheetId); });
+
+    if (aBorrar.length > 0) {
+      const requests = aBorrar.map(function(sheetId) {
+        return { deleteSheet: { sheetId } };
+      });
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        requestBody: { requests }
+      });
+      console.log("Hojas borradas:", aBorrar.length);
     }
 
     return res.status(200).json({
       ok: true,
-      creada: nuevoNombre,
-      borrada: borrada || "ninguna",
-      semanasTotales: semanas.length + 1 - (borrada ? 1 : 0)
+      creada: nombreNuevo,
+      borradas: aBorrar.length
     });
 
   } catch (err) {
-    console.error("Error en cron-semanal:", err);
+    console.error("Error en cron-mensual:", err);
     return res.status(500).json({ error: err.message });
   }
 };
 
-function numDeSemana(titulo) {
-  var match = titulo.match(/\d+/);
-  return match ? parseInt(match[0]) : 0;
-}
-
 async function getSheetsClient() {
   const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").trim();
   const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: GOOGLE_SA_EMAIL,
-      private_key: key
-    },
+    credentials: { client_email: GOOGLE_SA_EMAIL, private_key: key },
     scopes: ["https://www.googleapis.com/auth/spreadsheets"]
   });
   return google.sheets({ version: "v4", auth });
