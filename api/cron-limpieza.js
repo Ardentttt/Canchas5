@@ -27,12 +27,22 @@ module.exports = async function handler(req, res) {
       const rEstado = String(rows[i][10] || "");
       const rTs     = rows[i][12] || ""; // Columna M (Timestamp)
       
-      if (rEstado === "RESERVANDO" && rTs) {
-        const edad = ahora - new Date(rTs).getTime();
-        if (edad > EXPIRACION_MS) {
-          aBorrar.push(i + 1); // Índice corregido para filas de Sheets (0-based en loop, +1 saltea header)
-        }
-      }
+    // Dentro del bucle de limpieza:
+const rEstado = String(rows[i][10] || "");
+const rTs     = rows[i][12] || ""; // Columna M
+
+if (rEstado === "RESERVANDO" && rTs) {
+  const timestampReserva = Number(rTs);
+  
+  // Si la celda todavía tiene el formato ISO viejo ("2026-05-29..."), usa el Date nativo para que no rompa
+  const tiempoReservaMS = isNaN(timestampReserva) ? new Date(rTs).getTime() : timestampReserva;
+
+  const edad = Date.now() - tiempoReservaMS; // Números puros contra números puros
+
+  if (edad > EXPIRACION_MS) {
+    aBorrar.push(i + 1);
+  }
+}
     }
 
     if (aBorrar.length === 0) {
