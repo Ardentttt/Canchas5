@@ -65,29 +65,29 @@ module.exports = async function handler(req, res) {
 
     // IMPORTANTE: guardamos date con apóstrofe para que Sheets no lo convierta a formato fecha
     // Así el webhook puede comparar "2026-04-20" === "2026-04-20" sin problemas
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: GOOGLE_SHEET_ID,
-      range: sheetName + "!A:M",
-      valueInputOption: "RAW",  // RAW = sin interpretar, guarda texto exacto
-      requestBody: {
-        values: [[
-          reservaId,
-          now,
-          courtName,
-          String(courtId),
-          date,        // se guarda como texto exacto gracias a RAW
-          slot,
-          name,
-          String(phone),
-          fullPrice,
-          halfPrice,
-          "RESERVANDO",
-          "Pref MP: " + mpResponse.id,
-          now
-        ]]
-      }
-    });
-
+   // api/crear-pago.js (Modificá el bloque del append)
+await sheets.spreadsheets.values.append({
+  spreadsheetId: GOOGLE_SHEET_ID,
+  range: sheetName + "!A:M",
+  valueInputOption: "RAW",
+  requestBody: {
+    values: [[
+      reservaId,
+      now,
+      courtName,
+      String(courtId),
+      date,
+      slot,
+      name,
+      String(phone),
+      fullPrice,
+      halfPrice,
+      "RESERVANDO",
+      "Pref MP: " + mpResponse.id,
+      Date.now().toString() // <--- CAMBIÁ ESTO ACÁ (Guarda el número limpio)
+    ]]
+  }
+});
     console.log("Fila RESERVANDO guardada OK en:", sheetName, "date:", date, "slot:", slot);
 
     return res.status(200).json({
