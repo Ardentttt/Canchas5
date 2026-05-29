@@ -18,15 +18,63 @@ module.exports = async function handler(req, res) {
     const sheets    = await getSheetsClient();
     const sheetName = await getSheetName(sheets);
 
-    const response  = await sheets.spreadsheets.values.get({
+    // =============================================================
+    // AUTO-LIMPIEZA PASIVA: Borramos las expiradas antes de leer
+    // =============================================================
+    const responseInicial = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
       range: sheetName + "!A2:M1000"
     });
 
-    const rows   = response.data.values || [];
-    const ahora  = Date.now();
+    const rowsInicial = responseInicial.data.values || [];
+    const ahora = Date.now();
+    const aBorrar = [];
+
+    for (let i = 0; i < rowsInicial.length; i++) {
+      const rEstado = String(rowsInicial[i][10] || "");
+      const rTs     = rowsInicial[i][12] || ""; // Columna M (Timestamp)
+
+      if (rEstado === "RESERVANDO" && rTs) {
+        const timestampReserva = Number(rTs);
+        const tiempoReservaMS = isNaN(timestampReserva) ? new Date(rTs).getTime() : timestampReserva;
+        const edad = ahora - tiempoReservaMS;
+
+        if (edad > EXPIRACION_MS) {
+          aBorrar.push(i + 1); // Fila indexada (i=0 es fila 2, startIndex=1)
+        }
+      }
+    }
+
+    // Si encontramos celdas viejas, las borramos en lote antes de armar la grilla
+    if (aBorrar.length > 0) {
+      console.log("Limpieza pasiva: Borrando expiradas detectadas:", aBorrar.length);
+      const metaHoja = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+      const hoja = metaHoja.data.sheets.find(s => s.properties.title === sheetName);
+      
+      if (hoja) {
+        const sheetId = hoja.properties.sheetId;
+        const sorted = aBorrar.slice().sort((a, b) => b - a);
+        const requests = sorted.map(idx => ({
+          deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: idx, endIndex: idx + 1 } }
+        }));
+
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: GOOGLE_SHEET_ID,
+          requestBody: { requests }
+        });
+      }
+    }
+
+    // =============================================================
+    // LECTURA FINAL: Traemos los datos limpios para el frontend
+    // =============================================================
+    const responseFinal = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: sheetName + "!A2:M1000"
+    });
+
+    const rows = responseFinal.data.values || [];
     const result = {};
-    const aBorrar = []; // índices 0-based de la API de Sheets (fila 2 del sheet = índice 1)
 
     for (let i = 0; i < rows.length; i++) {
       const row      = rows[i];
@@ -34,78 +82,27 @@ module.exports = async function handler(req, res) {
       const rDate    = row[4]  || "";
       const rSlot    = row[5]  || "";
       const rEstado  = row[10] || "";
-      const rTs      = row[12] || "";
-
-      // Solo borrar RESERVANDO si realmente pasaron los 10 minutos
-      if (rEstado === "RESERVANDO" && rTs) {
-        const edad = ahora - new Date(rTs).getTime();
-        console.log("RESERVANDO encontrada, edad (ms):", edad, "limite:", EXPIRACION_MS, "expirada:", edad > EXPIRACION_MS);
-        if (edad > EXPIRACION_MS) {
-          // i=0 corresponde a fila 2 del sheet → startIndex=1 en la API (0-based, row 0 = header)
-          aBorrar.push(i + 1);
-          continue;
-        }
-        // No expirada → bloquear el turno
-        if (rCourtId === String(courtId)) {
-          const key   = rDate + "|" + rSlot;
-          result[key] = "pending";
-        }
-        continue;
-      }
 
       if (rCourtId === String(courtId) && rEstado !== "CANCELADA") {
-        const key   = rDate + "|" + rSlot;
+        const key = rDate + "|" + rSlot;
         result[key] = rEstado === "CONFIRMADA" ? "confirmed" : "pending";
       }
     }
 
-    if (aBorrar.length > 0) {
-      console.log("Borrando filas expiradas (índices 0-based):", aBorrar);
-      borrarFilas(sheets, sheetName, aBorrar).catch(console.error);
-    }
-
     return res.status(200).json(result);
+
   } catch (err) {
-    console.error("Error en ocupados:", err);
+    console.error("Error en ocupados con auto-limpieza:", err);
     return res.status(500).json({ error: err.message });
   }
 };
 
-async function borrarFilas(sheets, sheetName, rowIndexes) {
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-  const hoja = meta.data.sheets.find(function(s) { return s.properties.title === sheetName; });
-  if (!hoja) return;
-  const sheetId = hoja.properties.sheetId;
-
-  // Ordenar de mayor a menor para no desplazar índices al borrar
-  const sorted = rowIndexes.slice().sort(function(a, b) { return b - a; });
-
-  const requests = sorted.map(function(rowIndex) {
-    return {
-      deleteDimension: {
-        range: {
-          sheetId,
-          dimension: "ROWS",
-          startIndex: rowIndex,
-          endIndex:   rowIndex + 1
-        }
-      }
-    };
-  });
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    requestBody: { requests }
-  });
-  console.log("Filas expiradas borradas OK:", sorted);
-}
-
 async function getSheetName(sheets) {
   try {
-    const meta    = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-    const hojas   = meta.data.sheets.map(function(s) { return s.properties.title; });
-    const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
-    if (semanas.length > 0) return semanas[semanas.length - 1];
+    const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+    const hojas = meta.data.sheets.map(s => s.properties.title);
+    const meses = hojas.filter(h => h.startsWith("Mes "));
+    if (meses.length > 0) return meses[meses.length - 1];
     if (hojas.includes("Reservas")) return "Reservas";
     return hojas[0];
   } catch (e) {
@@ -114,15 +111,9 @@ async function getSheetName(sheets) {
 }
 
 async function getSheetsClient() {
-  const key = GOOGLE_SA_KEY
-    .replace(/\\n/g, "\n")
-    .replace(/\r\n/g, "\n")
-    .trim();
+  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").trim();
   const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: GOOGLE_SA_EMAIL,
-      private_key: key
-    },
+    credentials: { client_email: GOOGLE_SA_EMAIL, private_key: key },
     scopes: ["https://www.googleapis.com/auth/spreadsheets"]
   });
   return google.sheets({ version: "v4", auth });
