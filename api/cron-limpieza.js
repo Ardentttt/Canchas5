@@ -8,7 +8,7 @@ const GOOGLE_SA_KEY   = process.env.GOOGLE_SA_KEY;
 const EXPIRACION_MS = 10 * 60 * 1000; // 10 minutos
 
 module.exports = async function handler(req, res) {
-  // Solo permitir solicitudes GET (Vercel Crons utiliza GET)
+  // Solo permitir solicitudes GET (Vercel Crons usa GET)
   if (req.method !== "GET") return res.status(405).end();
 
   try {
@@ -19,7 +19,6 @@ module.exports = async function handler(req, res) {
       spreadsheetId: GOOGLE_SHEET_ID,
       range: sheetName + "!A2:M1000"
     });
-    
     const rows  = response.data.values || [];
     const ahora = Date.now();
     const aBorrar = [];
@@ -27,17 +26,17 @@ module.exports = async function handler(req, res) {
     for (let i = 0; i < rows.length; i++) {
       const rEstado = String(rows[i][10] || "");
       const rTs     = rows[i][12] || ""; // Columna M (Timestamp)
-
+      
       if (rEstado === "RESERVANDO" && rTs) {
         const timestampReserva = Number(rTs);
         
-        // Soporte de compatibilidad si queda algún formato ISO viejo ("2026-05-29...")
+        // CORRECCIÓN CRÍTICA: Si es un número puro lo usa directo, si es el formato ISO viejo usa new Date()
         const tiempoReservaMS = isNaN(timestampReserva) ? new Date(rTs).getTime() : timestampReserva;
 
-        const edad = ahora - tiempoReservaMS;
+        const edad = ahora - tiempoReservaMS; // Comparación matemática exacta libre de zonas horarias
 
         if (edad > EXPIRACION_MS) {
-          aBorrar.push(i + 1); // Fila 2 de la hoja corresponde a i=0, por ende startIndex=1
+          aBorrar.push(i + 1); // Índice correcto (0-based en loop, +1 saltea el header en Sheets)
         }
       }
     }
@@ -51,7 +50,7 @@ module.exports = async function handler(req, res) {
     if (!hoja) return res.status(404).json({ error: "Hoja no encontrada" });
     const sheetId = hoja.properties.sheetId;
 
-    // Ordenar de mayor a menor para borrar de abajo hacia arriba y no desplazar las filas remanentes
+    // Ordenar de mayor a menor para borrar de abajo hacia arriba y no desplazar los índices de las celdas
     const sorted   = aBorrar.slice().sort((a, b) => b - a);
     const requests = sorted.map(idx => ({
       deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: idx, endIndex: idx + 1 } }
