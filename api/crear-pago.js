@@ -8,7 +8,7 @@ const GOOGLE_SA_EMAIL  = process.env.GOOGLE_SA_EMAIL;
 const GOOGLE_SA_KEY    = process.env.GOOGLE_SA_KEY;
 const BASE_URL         = process.env.BASE_URL;
 
-const EXPIRACION_MS = 10 * 60 * 1000;
+const EXPIRACION_MS = 10 * 60 * 1000; // 10 minutos
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -63,31 +63,30 @@ module.exports = async function handler(req, res) {
     const reservaId = "R" + Date.now().toString().slice(-7);
     const now       = new Date().toISOString();
 
-    // IMPORTANTE: guardamos date con apóstrofe para que Sheets no lo convierta a formato fecha
-    // Así el webhook puede comparar "2026-04-20" === "2026-04-20" sin problemas
-   // api/crear-pago.js (Modificá el bloque del append)
-await sheets.spreadsheets.values.append({
-  spreadsheetId: GOOGLE_SHEET_ID,
-  range: sheetName + "!A:M",
-  valueInputOption: "RAW",
-  requestBody: {
-    values: [[
-      reservaId,
-      now,
-      courtName,
-      String(courtId),
-      date,
-      slot,
-      name,
-      String(phone),
-      fullPrice,
-      halfPrice,
-      "RESERVANDO",
-      "Pref MP: " + mpResponse.id,
-      Date.now().toString() // <--- CAMBIÁ ESTO ACÁ (Guarda el número limpio)
-    ]]
-  }
-});
+    // Guardamos los datos de la reserva temporal
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: sheetName + "!A:M",
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [[
+          reservaId,
+          now,
+          courtName,
+          String(courtId),
+          date,
+          slot,
+          name,
+          String(phone),
+          fullPrice,
+          halfPrice,
+          "RESERVANDO",
+          "Pref MP: " + mpResponse.id,
+          Date.now().toString() // Guarda milisegundos numéricos puros (Unix Epoch)
+        ]]
+      }
+    });
+    
     console.log("Fila RESERVANDO guardada OK en:", sheetName, "date:", date, "slot:", slot);
 
     return res.status(200).json({
@@ -117,15 +116,20 @@ async function checkDisponibilidad(sheets, sheetName, courtId, date, slot) {
       const rDate    = row[4]  || "";
       const rSlot    = row[5]  || "";
       const rEstado  = row[10] || "";
-      const rTs      = row[12] || "";
+      const rTs      = row[12] || ""; // Columna M
 
       if (rCourtId !== String(courtId) || rDate !== date || rSlot !== slot) continue;
       if (rEstado === "CANCELADA") continue;
+      
       if (rEstado === "RESERVANDO" && rTs) {
-        const edad = ahora - new Date(rTs).getTime();
-        if (edad > EXPIRACION_MS) continue;
+        const timestampReserva = Number(rTs);
+        // Compatibilidad por si queda algún string de fecha ISO viejo en la hoja
+        const tiempoReservaMS = isNaN(timestampReserva) ? new Date(rTs).getTime() : timestampReserva;
+        
+        const edad = ahora - tiempoReservaMS;
+        if (edad > EXPIRACION_MS) continue; // Si ya expiró, ignoramos esta fila (está disponible)
       }
-      return false;
+      return false; // El turno está ocupado por una reserva activa o pendiente no expirada
     }
     return true;
   } catch (e) {
@@ -138,9 +142,15 @@ async function getSheetName(sheets) {
   try {
     const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
     const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
-    console.log("Hojas disponibles:", JSON.stringify(hojas));
+    
+    // Buscar hojas mensuales primero ("Mes YYYY-MM")
+    const meses = hojas.filter(function(h) { return h.startsWith("Mes "); });
+    if (meses.length > 0) return meses[meses.length - 1];
+    
+    // Fallback por si quedan hojas semanales viejas
     const semanas = hojas.filter(function(h) { return h.startsWith("Semana"); });
     if (semanas.length > 0) return semanas[semanas.length - 1];
+    
     if (hojas.includes("Reservas")) return "Reservas";
     return hojas[0];
   } catch (e) {
