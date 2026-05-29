@@ -6,7 +6,7 @@
   "crons": [
     {
       "path": "/api/cron-semanal",
-      "schedule": "*/10 * * * *"
+      "schedule": "0 6 1 * *"
     }
   ]
 }
