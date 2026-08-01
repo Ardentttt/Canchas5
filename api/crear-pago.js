@@ -1,4 +1,7 @@
 // api/crear-pago.js
+// NO escribe en el Sheet. Solo crea la preferencia de MP con los datos en metadata.
+// El webhook escribe la fila directamente cuando el pago se aprueba.
+
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 const { google } = require("googleapis");
 
@@ -41,6 +44,7 @@ module.exports = async function handler(req, res) {
     const sheets    = await getSheetsClient();
     const sheetName = await getOrCreateSheetName(sheets);
 
+    // Verificar que el turno no esté ya CONFIRMADA en el Sheet
     const disponible = await checkDisponibilidad(sheets, sheetName, courtId, date, slot);
     if (!disponible) {
       return res.status(409).json({ error: "Ese turno ya fue reservado. Elegí otro." });
@@ -49,6 +53,7 @@ module.exports = async function handler(req, res) {
     const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
     const pref   = new Preference(client);
     const extRef = courtId + "|" + date + "|" + slot + "|" + Date.now();
+    const nowAR  = aHoraArgentina(new Date().toISOString());
 
     const mpResponse = await pref.create({
       body: {
@@ -63,34 +68,23 @@ module.exports = async function handler(req, res) {
         auto_return: "approved",
         notification_url: BASE_URL + "/api/webhook",
         statement_descriptor: "CANCHA5",
-        metadata: { courtId, courtName, date, slot, name, phone, halfPrice, fullPrice }
+        // Todos los datos van en metadata para que el webhook los use
+        metadata: {
+          courtId: String(courtId),
+          courtName, date, slot, name,
+          phone: String(phone),
+          fullPrice, halfPrice,
+          horaAR: nowAR,
+          sheetName
+        }
       }
     });
 
-    const reservaId = "R" + Date.now().toString().slice(-7);
-    const nowISO    = new Date().toISOString();
-    const nowAR     = aHoraArgentina(nowISO);
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: GOOGLE_SHEET_ID,
-      range: sheetName + "!A:K",
-      valueInputOption: "RAW",
-      requestBody: { values: [[
-        reservaId, nowAR, courtName, String(courtId),
-        date, slot, name, String(phone),
-        fullPrice, "RESERVANDO", "Pref MP: " + mpResponse.id + "|TS:" + nowISO
-      ]]}
-    });
-
-    // Ordenar inmediatamente después de guardar
-    ordenarHoja(sheets, sheetName).catch(console.error);
-
-    console.log("RESERVANDO guardada en:", sheetName, date, slot);
+    console.log("Preferencia creada, sin escribir en Sheet:", extRef);
 
     return res.status(200).json({
       init_point:    mpResponse.init_point,
       preference_id: mpResponse.id,
-      reserva_id:    reservaId,
       expires_at:    Date.now() + EXPIRACION_MS
     });
 
@@ -102,60 +96,23 @@ module.exports = async function handler(req, res) {
 
 async function checkDisponibilidad(sheets, sheetName, courtId, date, slot) {
   try {
-    const r     = await sheets.spreadsheets.values.get({
+    const r    = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
     });
-    const rows  = r.data.values || [];
-    const ahora = Date.now();
+    const rows = r.data.values || [];
     for (const row of rows) {
       if (String(row[3]||"") !== String(courtId)) continue;
       if ((row[4]||"") !== date) continue;
       if ((row[5]||"") !== slot) continue;
       const estado = row[9] || "";
-      if (estado === "CANCELADA") continue;
-      if (estado === "RESERVANDO") {
-        const notas = row[10] || "";
-        const match = notas.match(/TS:(.+)$/);
-        if (match && (ahora - new Date(match[1]).getTime()) > EXPIRACION_MS) continue;
-      }
-      return false;
+      // Solo bloquear si está CONFIRMADA o PENDIENTE
+      if (estado === "CONFIRMADA" || estado === "PENDIENTE") return false;
     }
     return true;
   } catch (e) {
     console.error("Error disponibilidad:", e);
     return true;
   }
-}
-
-// Ordena la hoja por Fecha Turno (col E) + Horario (col F) ascendente
-// Las filas RESERVANDO también se ordenan, pero como tienen fecha real quedan bien ubicadas
-async function ordenarHoja(sheets, sheetName) {
-  const r    = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
-  });
-  const rows = r.data.values || [];
-  if (rows.length === 0) return;
-
-  const sorted = rows.slice().sort(function(a, b) {
-    const dA = a[4] || "", dB = b[4] || "";
-    if (dA !== dB) return dA < dB ? -1 : 1;
-    const sA = a[5] || "", sB = b[5] || "";
-    return sA < sB ? -1 : sA > sB ? 1 : 0;
-  });
-
-  const padded = sorted.map(function(row) {
-    const r = row.slice();
-    while (r.length < 11) r.push("");
-    return r;
-  });
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: sheetName + "!A2:K" + (padded.length + 1),
-    valueInputOption: "RAW",
-    requestBody: { values: padded }
-  });
-  console.log("Hoja ordenada:", padded.length, "filas");
 }
 
 async function getOrCreateSheetName(sheets) {

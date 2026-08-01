@@ -1,4 +1,7 @@
 // api/webhook.js
+// Escribe la fila en el Sheet SOLO cuando el pago está aprobado.
+// Usa pago.metadata para obtener los datos (no depende de nada en el Sheet).
+
 const { MercadoPagoConfig, Payment } = require("mercadopago");
 const { google } = require("googleapis");
 
@@ -7,13 +10,11 @@ const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SA_EMAIL = process.env.GOOGLE_SA_EMAIL;
 const GOOGLE_SA_KEY   = process.env.GOOGLE_SA_KEY;
 
-const EXPIRACION_MS = 10 * 60 * 1000;
-
 const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
                "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
-// Columnas: A=ID B=Hora C=Cancha D=CanchaID E=FechaTurno F=Horario
-//           G=Nombre H=Tel I=Precio J=Estado K=Notas
+const HEADERS = ["ID","Hora","Cancha","Cancha ID","Fecha Turno",
+                 "Horario","Nombre","Teléfono","Precio Total","Estado","Notas"];
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -31,20 +32,53 @@ module.exports = async function handler(req, res) {
 
     const estado = pago.status;
     const extRef = pago.external_reference || "";
-    console.log("Webhook:", data.id, "estado:", estado, "ref:", extRef);
+    const meta   = pago.metadata || {};
 
-    const sheets    = await getSheetsClient();
-    const sheetName = await getOrCreateSheetName(sheets);
-
-    await limpiarExpiradas(sheets, sheetName);
+    console.log("Webhook:", data.id, "estado:", estado);
 
     if (estado === "approved") {
-      await actualizarEstado(sheets, sheetName, extRef, "CONFIRMADA", data.id);
+      const sheets    = await getSheetsClient();
+      const sheetName = await getOrCreateSheetName(sheets, meta.sheet_name);
+
+      // Verificar que no esté ya registrada (evitar duplicados por webhook repetido)
+      const yaExiste = await buscarFila(sheets, sheetName, extRef);
+      if (yaExiste) {
+        console.log("Ya registrada, ignorando duplicado");
+        return res.status(200).json({ received: true });
+      }
+
+      const reservaId = "R" + data.id.toString().slice(-7);
+
+      // Escribir fila directamente como CONFIRMADA
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        range: sheetName + "!A:K",
+        valueInputOption: "RAW",
+        requestBody: { values: [[
+          reservaId,
+          meta.hora_ar || "",
+          meta.court_name || "",
+          meta.court_id || "",
+          meta.date || "",
+          meta.slot || "",
+          meta.name || "",
+          meta.phone || "",
+          meta.full_price || "",
+          "CONFIRMADA",
+          "Pago MP #" + data.id
+        ]]}
+      });
+
+      console.log("Fila CONFIRMADA escrita en:", sheetName);
+
+      // Ordenar la hoja por fecha + horario
       await ordenarHoja(sheets, sheetName);
+
     } else if (estado === "rejected" || estado === "cancelled") {
-      await borrarReserva(sheets, sheetName, extRef);
+      // No hay nada en el Sheet que borrar — simplemente ignorar
+      console.log("Pago rechazado/cancelado, nada que hacer en Sheet");
     } else {
-      await actualizarEstado(sheets, sheetName, extRef, "PENDIENTE", data.id);
+      console.log("Estado pendiente:", estado, "— esperando aprobación");
     }
 
     return res.status(200).json({ received: true });
@@ -54,95 +88,29 @@ module.exports = async function handler(req, res) {
   }
 };
 
-async function actualizarEstado(sheets, sheetName, extRef, nuevoEstado, pagoId) {
+// Busca si ya existe una fila con ese extRef en Notas para evitar duplicados
+async function buscarFila(sheets, sheetName, extRef) {
   const r    = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
   });
   const rows = r.data.values || [];
-
-  const parts   = extRef.split("|");
+  // Extraemos el courtId|date|slot del extRef para comparar
+  const parts = extRef.split("|");
   const courtId = parts[0] || "";
   const date    = parts[1] || "";
   const slot    = parts[2] || "";
-
-  for (let i = 0; i < rows.length; i++) {
-    const row    = rows[i];
-    const rCourt = String(row[3] || "");
-    const rDate  = String(row[4] || "");
-    const rSlot  = String(row[5] || "");
-    const rEst   = String(row[9] || "");
-
-    if (rCourt === courtId && rDate === date && rSlot === slot
-        && rEst !== "CONFIRMADA" && rEst !== "CANCELADA") {
-      const n = i + 2;
-      // Col J = Estado, Col K = Notas
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: GOOGLE_SHEET_ID,
-        range: sheetName + "!J" + n,
-        valueInputOption: "RAW",
-        requestBody: { values: [[nuevoEstado]] }
-      });
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: GOOGLE_SHEET_ID,
-        range: sheetName + "!K" + n,
-        valueInputOption: "RAW",
-        requestBody: { values: [["Pago MP #" + pagoId]] }
-      });
-      console.log("Fila", n, "->", nuevoEstado);
-      return;
+  for (const row of rows) {
+    if (String(row[3]||"") === courtId &&
+        String(row[4]||"") === date &&
+        String(row[5]||"") === slot &&
+        String(row[9]||"") === "CONFIRMADA") {
+      return true;
     }
   }
-  console.log("No se encontro fila para:", courtId, date, slot);
+  return false;
 }
 
-async function borrarReserva(sheets, sheetName, extRef) {
-  const r    = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
-  });
-  const rows = r.data.values || [];
-
-  const parts   = extRef.split("|");
-  const courtId = parts[0] || "";
-  const date    = parts[1] || "";
-  const slot    = parts[2] || "";
-
-  for (let i = 0; i < rows.length; i++) {
-    const row  = rows[i];
-    if (String(row[3]||"") === courtId && String(row[4]||"") === date
-        && String(row[5]||"") === slot && String(row[9]||"") !== "CONFIRMADA") {
-      await borrarFila(sheets, sheetName, i + 1);
-      console.log("Fila borrada (rechazado/cancelado)");
-      return;
-    }
-  }
-}
-
-async function limpiarExpiradas(sheets, sheetName) {
-  const r    = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
-  });
-  const rows    = r.data.values || [];
-  const ahora   = Date.now();
-  const aBorrar = [];
-
-  for (let i = 0; i < rows.length; i++) {
-    const rEst  = String(rows[i][9] || "");
-    const notas = rows[i][10] || "";
-    if (rEst === "RESERVANDO") {
-      const match = notas.match(/TS:(.+)$/);
-      if (match) {
-        const edad = ahora - new Date(match[1]).getTime();
-        if (edad > EXPIRACION_MS) aBorrar.push(i + 1);
-      }
-    }
-  }
-
-  if (aBorrar.length === 0) return;
-  await borrarVariasFilas(sheets, sheetName, aBorrar);
-  console.log("Expiradas borradas:", aBorrar.length);
-}
-
-// Ordena la hoja por Fecha Turno (col E) + Horario (col F) ascendente
+// Ordena la hoja por Fecha Turno (col E) + Horario (col F)
 async function ordenarHoja(sheets, sheetName) {
   const r    = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
@@ -172,34 +140,17 @@ async function ordenarHoja(sheets, sheetName) {
   console.log("Hoja ordenada:", padded.length, "filas");
 }
 
-async function borrarFila(sheets, sheetName, idx) {
-  await borrarVariasFilas(sheets, sheetName, [idx]);
-}
-
-async function borrarVariasFilas(sheets, sheetName, indexes) {
-  const meta    = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-  const hoja    = meta.data.sheets.find(function(s) { return s.properties.title === sheetName; });
-  if (!hoja) return;
-  const sheetId = hoja.properties.sheetId;
-  const sorted  = indexes.slice().sort(function(a, b) { return b - a; });
-  const reqs    = sorted.map(function(i) {
-    return { deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: i, endIndex: i + 1 } } };
-  });
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: GOOGLE_SHEET_ID, requestBody: { requests: reqs } });
-}
-
-async function getOrCreateSheetName(sheets) {
+async function getOrCreateSheetName(sheets, metaSheetName) {
+  // Intentar usar el sheetName guardado en metadata primero
+  // MP convierte las claves a snake_case, por eso meta.sheet_name
   const ahora  = new Date();
-  const nombre = MESES[ahora.getMonth()] + " " + ahora.getFullYear();
+  const nombre = metaSheetName || (MESES[ahora.getMonth()] + " " + ahora.getFullYear());
 
   const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
-
   if (hojas.includes(nombre)) return nombre;
 
-  const HEADERS = ["ID","Hora","Cancha","Cancha ID","Fecha Turno",
-                   "Horario","Nombre","Teléfono","Precio Total","Estado","Notas"];
-
+  // Si no existe, crear
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: GOOGLE_SHEET_ID,
     requestBody: { requests: [{ addSheet: {
@@ -210,29 +161,21 @@ async function getOrCreateSheetName(sheets) {
     spreadsheetId: GOOGLE_SHEET_ID, range: nombre + "!A1:K1",
     valueInputOption: "RAW", requestBody: { values: [HEADERS] }
   });
-
   const metaNew = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   const hojaNew = metaNew.data.sheets.find(function(s) { return s.properties.title === nombre; });
   const sid     = hojaNew.properties.sheetId;
-
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: GOOGLE_SHEET_ID,
     requestBody: { requests: [
-      { repeatCell: {
-          range: { sheetId: sid, startRowIndex: 0, endRowIndex: 1 },
+      { repeatCell: { range: { sheetId: sid, startRowIndex: 0, endRowIndex: 1 },
           cell: { userEnteredFormat: {
             backgroundColor: { red: 0.067, green: 0.122, blue: 0.082 },
             textFormat: { bold: true, foregroundColor: { red: 0.0, green: 0.91, blue: 0.478 } }
-          }},
-          fields: "userEnteredFormat(backgroundColor,textFormat)"
-      }},
-      { updateSheetProperties: {
-          properties: { sheetId: sid, gridProperties: { frozenRowCount: 1 } },
-          fields: "gridProperties.frozenRowCount"
-      }}
+          }}, fields: "userEnteredFormat(backgroundColor,textFormat)" }},
+      { updateSheetProperties: { properties: { sheetId: sid, gridProperties: { frozenRowCount: 1 } },
+          fields: "gridProperties.frozenRowCount" }}
     ]}
   });
-
   console.log("Hoja creada:", nombre);
   return nombre;
 }
