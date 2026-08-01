@@ -42,7 +42,7 @@ module.exports = async function handler(req, res) {
     }
 
     const sheets    = await getSheetsClient();
-    const sheetName = await getOrCreateSheetName(sheets);
+    const sheetName = await getOrCreateSheetName(sheets, date);
 
     // Verificar que el turno no esté ya CONFIRMADA en el Sheet
     const disponible = await checkDisponibilidad(sheets, sheetName, courtId, date, slot);
@@ -115,8 +115,8 @@ async function checkDisponibilidad(sheets, sheetName, courtId, date, slot) {
   }
 }
 
-async function getOrCreateSheetName(sheets) {
-  const ahora  = new Date();
+async function getOrCreateSheetName(sheets, fechaTurno) {
+  const ahora  = fechaTurno ? new Date(fechaTurno + "T00:00:00") : new Date();
   const nombre = MESES[ahora.getMonth()] + " " + ahora.getFullYear();
   const meta   = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   const hojas  = meta.data.sheets.map(function(s) { return s.properties.title; });

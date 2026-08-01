@@ -38,7 +38,7 @@ module.exports = async function handler(req, res) {
 
     if (estado === "approved") {
       const sheets    = await getSheetsClient();
-      const sheetName = await getOrCreateSheetName(sheets, meta.sheet_name);
+      const sheetName = await getOrCreateSheetName(sheets, meta.date || meta.sheet_name);
 
       // Verificar que no esté ya registrada (evitar duplicados por webhook repetido)
       const yaExiste = await buscarFila(sheets, sheetName, extRef);
@@ -140,11 +140,13 @@ async function ordenarHoja(sheets, sheetName) {
   console.log("Hoja ordenada:", padded.length, "filas");
 }
 
-async function getOrCreateSheetName(sheets, metaSheetName) {
+async function getOrCreateSheetName(sheets, fechaONombre) {
   // Intentar usar el sheetName guardado en metadata primero
   // MP convierte las claves a snake_case, por eso meta.sheet_name
   const ahora  = new Date();
-  const nombre = metaSheetName || (MESES[ahora.getMonth()] + " " + ahora.getFullYear());
+  const esFecha = fechaONombre && /^\d{4}-\d{2}/.test(fechaONombre);
+  const base   = esFecha ? new Date(fechaONombre + "T00:00:00") : new Date();
+  const nombre = MESES[base.getMonth()] + " " + base.getFullYear();
 
   const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
