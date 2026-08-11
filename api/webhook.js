@@ -1,6 +1,6 @@
 // api/webhook.js
-// Escribe la fila en el Sheet SOLO cuando el pago está aprobado.
-// Usa pago.metadata para obtener los datos (no depende de nada en el Sheet).
+// Al aprobar: escribe en hoja mensual + borra de Temp + ordena.
+// Al rechazar/cancelar: solo borra de Temp.
 
 const { MercadoPagoConfig, Payment } = require("mercadopago");
 const { google } = require("googleapis");
@@ -10,11 +10,13 @@ const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SA_EMAIL = process.env.GOOGLE_SA_EMAIL;
 const GOOGLE_SA_KEY   = process.env.GOOGLE_SA_KEY;
 
+const TEMP_SHEET = "Temp";
+
 const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
                "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
-const HEADERS = ["ID","Hora","Cancha","Cancha ID","Fecha Turno",
-                 "Horario","Nombre","Teléfono","Precio Total","Estado","Notas"];
+const HEADERS_MENSUAL = ["ID","Hora","Cancha","Cancha ID","Fecha Turno",
+                         "Horario","Nombre","Teléfono","Precio Total","Estado","Notas"];
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -36,49 +38,48 @@ module.exports = async function handler(req, res) {
 
     console.log("Webhook:", data.id, "estado:", estado);
 
-    if (estado === "approved") {
-      const sheets    = await getSheetsClient();
-      const sheetName = await getOrCreateSheetName(sheets, meta.date || meta.sheet_name);
+    const sheets = await getSheetsClient();
 
-      // Verificar que no esté ya registrada (evitar duplicados por webhook repetido)
-      const yaExiste = await buscarFila(sheets, sheetName, extRef);
-      if (yaExiste) {
-        console.log("Ya registrada, ignorando duplicado");
-        return res.status(200).json({ received: true });
+    if (estado === "approved") {
+      const fechaTurno = meta.date || "";
+      const sheetName  = await getOrCreateSheetName(sheets, fechaTurno);
+
+      // Evitar duplicados
+      const yaExiste = await buscarConfirmada(sheets, sheetName, extRef);
+      if (!yaExiste) {
+        const reservaId = "R" + data.id.toString().slice(-7);
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: GOOGLE_SHEET_ID,
+          range: sheetName + "!A:K",
+          valueInputOption: "RAW",
+          requestBody: { values: [[
+            reservaId,
+            meta.hora_ar    || "",
+            meta.court_name || "",
+            meta.court_id   || "",
+            meta.date       || "",
+            meta.slot       || "",
+            meta.name       || "",
+            meta.phone      || "",
+            meta.full_price || "",
+            "CONFIRMADA",
+            "Pago MP #" + data.id
+          ]]}
+        });
+        console.log("CONFIRMADA escrita en:", sheetName);
+        await ordenarHoja(sheets, sheetName);
+      } else {
+        console.log("Duplicado ignorado");
       }
 
-      const reservaId = "R" + data.id.toString().slice(-7);
-
-      // Escribir fila directamente como CONFIRMADA
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: GOOGLE_SHEET_ID,
-        range: sheetName + "!A:K",
-        valueInputOption: "RAW",
-        requestBody: { values: [[
-          reservaId,
-          meta.hora_ar || "",
-          meta.court_name || "",
-          meta.court_id || "",
-          meta.date || "",
-          meta.slot || "",
-          meta.name || "",
-          meta.phone || "",
-          meta.full_price || "",
-          "CONFIRMADA",
-          "Pago MP #" + data.id
-        ]]}
-      });
-
-      console.log("Fila CONFIRMADA escrita en:", sheetName);
-
-      // Ordenar la hoja por fecha + horario
-      await ordenarHoja(sheets, sheetName);
+      // Borrar de Temp en cualquier caso
+      await borrarDeTemp(sheets, extRef);
 
     } else if (estado === "rejected" || estado === "cancelled") {
-      // No hay nada en el Sheet que borrar — simplemente ignorar
-      console.log("Pago rechazado/cancelado, nada que hacer en Sheet");
+      await borrarDeTemp(sheets, extRef);
+      console.log("Borrado de Temp por rechazo/cancelación");
     } else {
-      console.log("Estado pendiente:", estado, "— esperando aprobación");
+      console.log("Estado pendiente:", estado);
     }
 
     return res.status(200).json({ received: true });
@@ -88,29 +89,50 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// Busca si ya existe una fila con ese extRef en Notas para evitar duplicados
-async function buscarFila(sheets, sheetName, extRef) {
-  const r    = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
-  });
-  const rows = r.data.values || [];
-  // Extraemos el courtId|date|slot del extRef para comparar
-  const parts = extRef.split("|");
+async function buscarConfirmada(sheets, sheetName, extRef) {
+  const parts   = extRef.split("|");
   const courtId = parts[0] || "";
   const date    = parts[1] || "";
   const slot    = parts[2] || "";
-  for (const row of rows) {
-    if (String(row[3]||"") === courtId &&
-        String(row[4]||"") === date &&
-        String(row[5]||"") === slot &&
-        String(row[9]||"") === "CONFIRMADA") {
-      return true;
-    }
+  const r       = await sheets.spreadsheets.values.get({
+    spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
+  });
+  for (const row of r.data.values || []) {
+    if (String(row[3]||"") === courtId && (row[4]||"") === date &&
+        (row[5]||"") === slot && (row[9]||"") === "CONFIRMADA") return true;
   }
   return false;
 }
 
-// Ordena la hoja por Fecha Turno (col E) + Horario (col F)
+async function borrarDeTemp(sheets, extRef) {
+  try {
+    const r    = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID, range: TEMP_SHEET + "!A2:E1000"
+    });
+    const rows = r.data.values || [];
+    const aBorrar = [];
+    for (let i = 0; i < rows.length; i++) {
+      if ((rows[i][0] || "") === extRef) aBorrar.push(i + 1);
+    }
+    if (aBorrar.length === 0) return;
+
+    const meta    = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+    const hoja    = meta.data.sheets.find(function(s) { return s.properties.title === TEMP_SHEET; });
+    if (!hoja) return;
+    const sheetId = hoja.properties.sheetId;
+    const sorted  = aBorrar.slice().sort(function(a, b) { return b - a; });
+    const reqs    = sorted.map(function(idx) {
+      return { deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: idx, endIndex: idx + 1 } } };
+    });
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: GOOGLE_SHEET_ID, requestBody: { requests: reqs }
+    });
+    console.log("Borrado de Temp:", extRef);
+  } catch (e) {
+    console.error("Error borrando de Temp:", e);
+  }
+}
+
 async function ordenarHoja(sheets, sheetName) {
   const r    = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID, range: sheetName + "!A2:K1000"
@@ -119,9 +141,9 @@ async function ordenarHoja(sheets, sheetName) {
   if (rows.length === 0) return;
 
   const sorted = rows.slice().sort(function(a, b) {
-    const dA = a[4] || "", dB = b[4] || "";
+    const dA = a[4]||"", dB = b[4]||"";
     if (dA !== dB) return dA < dB ? -1 : 1;
-    const sA = a[5] || "", sB = b[5] || "";
+    const sA = a[5]||"", sB = b[5]||"";
     return sA < sB ? -1 : sA > sB ? 1 : 0;
   });
 
@@ -140,19 +162,13 @@ async function ordenarHoja(sheets, sheetName) {
   console.log("Hoja ordenada:", padded.length, "filas");
 }
 
-async function getOrCreateSheetName(sheets, fechaONombre) {
-  // Intentar usar el sheetName guardado en metadata primero
-  // MP convierte las claves a snake_case, por eso meta.sheet_name
-  const ahora  = new Date();
-  const esFecha = fechaONombre && /^\d{4}-\d{2}/.test(fechaONombre);
-  const base   = esFecha ? new Date(fechaONombre + "T00:00:00") : new Date();
+async function getOrCreateSheetName(sheets, fechaTurno) {
+  const base   = fechaTurno ? new Date(fechaTurno + "T00:00:00") : new Date();
   const nombre = MESES[base.getMonth()] + " " + base.getFullYear();
-
-  const meta  = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-  const hojas = meta.data.sheets.map(function(s) { return s.properties.title; });
+  const meta   = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+  const hojas  = meta.data.sheets.map(function(s) { return s.properties.title; });
   if (hojas.includes(nombre)) return nombre;
 
-  // Si no existe, crear
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: GOOGLE_SHEET_ID,
     requestBody: { requests: [{ addSheet: {
@@ -161,7 +177,7 @@ async function getOrCreateSheetName(sheets, fechaONombre) {
   });
   await sheets.spreadsheets.values.update({
     spreadsheetId: GOOGLE_SHEET_ID, range: nombre + "!A1:K1",
-    valueInputOption: "RAW", requestBody: { values: [HEADERS] }
+    valueInputOption: "RAW", requestBody: { values: [HEADERS_MENSUAL] }
   });
   const metaNew = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   const hojaNew = metaNew.data.sheets.find(function(s) { return s.properties.title === nombre; });
@@ -178,7 +194,7 @@ async function getOrCreateSheetName(sheets, fechaONombre) {
           fields: "gridProperties.frozenRowCount" }}
     ]}
   });
-  console.log("Hoja creada:", nombre);
+  console.log("Hoja mensual creada:", nombre);
   return nombre;
 }
 
