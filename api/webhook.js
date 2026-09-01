@@ -70,7 +70,7 @@ module.exports = async function handler(req, res) {
         });
         console.log("CONFIRMADA escrita en:", sheetName);
         
-        // Crear evento en Google Calendar
+        // Crear evento en Google Calendar con horario exacto
         if (GOOGLE_CALENDAR_ID && meta.date && meta.slot) {
           await crearEventoCalendar(auth, {
             courtName: meta.court_name,
@@ -109,12 +109,16 @@ async function crearEventoCalendar(auth, info) {
   try {
     const calendar = google.calendar({ version: "v3", auth });
 
-    const slotLimpio = info.slot.replace(" hs", "").trim();
-    const horaInicio = parseInt(slotLimpio.split(":")[0], 10);
-    const minutoInicio = slotLimpio.split(":")[1] || "00";
+    const slotLimpio = String(info.slot).replace(" hs", "").trim();
+    const partesHora = slotLimpio.split(":");
+    const horaInicio = parseInt(partesHora[0], 10);
+    const minutoInicio = partesHora[1] || "00";
 
-    const startISO = `${info.date}T${String(horaInicio).padStart(2, "0")}:${minutoInicio}:00`;
-    const endISO   = `${info.date}T${String(horaInicio + 1).padStart(2, "0")}:${minutoInicio}:00`;
+    const horaFin = horaInicio + 1;
+
+    // Offset explícito para Argentina (-03:00)
+    const startStr = `${info.date}T${String(horaInicio).padStart(2, "0")}:${minutoInicio}:00-03:00`;
+    const endStr   = `${info.date}T${String(horaFin).padStart(2, "0")}:${minutoInicio}:00-03:00`;
 
     await calendar.events.insert({
       calendarId: GOOGLE_CALENDAR_ID,
@@ -122,17 +126,17 @@ async function crearEventoCalendar(auth, info) {
         summary: `⚽ ${info.courtName} - ${info.name}`,
         description: `Reserva: ${info.reservaId}\nCliente: ${info.name}\nTeléfono: ${info.phone}\nPago MP: #${info.paymentId}`,
         start: {
-          dateTime: new Date(startISO).toISOString(),
+          dateTime: startStr,
           timeZone: "America/Argentina/Buenos_Aires"
         },
         end: {
-          dateTime: new Date(endISO).toISOString(),
+          dateTime: endStr,
           timeZone: "America/Argentina/Buenos_Aires"
         }
       }
     });
 
-    console.log("Evento creado en Google Calendar con éxito");
+    console.log("Evento creado en Google Calendar en horario correcto:", startStr);
   } catch (err) {
     console.error("Error creando evento en Google Calendar:", err);
   }
