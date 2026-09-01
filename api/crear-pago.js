@@ -14,6 +14,12 @@ const BASE_URL        = process.env.BASE_URL;
 const EXPIRACION_MS = 10 * 60 * 1000;
 const TEMP_SHEET    = "Temp";
 
+// Precios oficiales definidos en el servidor (evita manipulación del cliente)
+const CANCHAS_PRECIOS = {
+  "1": { name: "Cancha 1 — Techada", price: 8000 },
+  "2": { name: "Cancha 2 — Destechada", price: 6500 }
+};
+
 const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
                "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
@@ -38,11 +44,36 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST")   return res.status(405).json({ error: "Método no permitido" });
 
   try {
-    const { courtId, courtName, date, slot, name, phone, halfPrice, fullPrice } = req.body;
+    const { courtId, date, slot, name, phone } = req.body;
 
-    if (!courtId || !date || !slot || !name || !phone || !halfPrice) {
+    if (!courtId || !date || !slot || !name || !phone) {
       return res.status(400).json({ error: "Faltan datos de la reserva" });
     }
+
+    // Validación y sanitización de inputs
+    const cleanCourtId = String(courtId).trim();
+    const infoCancha = CANCHAS_PRECIOS[cleanCourtId];
+    if (!infoCancha) {
+      return res.status(400).json({ error: "Cancha inválida" });
+    }
+
+    const cleanDate = String(date).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
+      return res.status(400).json({ error: "Formato de fecha inválido" });
+    }
+
+    const cleanSlot = String(slot).trim().slice(0, 10);
+    const cleanName = String(name).trim().slice(0, 50);
+    const cleanPhone = String(phone).replace(/[^0-9+\s-]/g, "").trim().slice(0, 25);
+
+    if (cleanName.length < 2 || cleanPhone.length < 6) {
+      return res.status(400).json({ error: "Nombre o teléfono inválidos" });
+    }
+
+    // Precios fijados por backend
+    const fullPrice = infoCancha.price;
+    const halfPrice = Math.round(fullPrice / 2);
+    const courtName = infoCancha.name;
 
     const sheets = await getSheetsClient();
 
@@ -53,8 +84,8 @@ module.exports = async function handler(req, res) {
     await limpiarTempExpiradas(sheets);
 
     // Verificar disponibilidad: hoja mensual + Temp
-    const sheetMes   = await getOrCreateSheetName(sheets, date);
-    const disponible = await checkDisponibilidad(sheets, sheetMes, courtId, date, slot);
+    const sheetMes   = await getOrCreateSheetName(sheets, cleanDate);
+    const disponible = await checkDisponibilidad(sheets, sheetMes, cleanCourtId, cleanDate, cleanSlot);
     if (!disponible) {
       return res.status(409).json({ error: "Ese turno ya fue reservado. Elegí otro." });
     }
@@ -62,28 +93,36 @@ module.exports = async function handler(req, res) {
     // Crear preferencia de MP
     const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
     const pref   = new Preference(client);
-    const extRef = courtId + "|" + date + "|" + slot + "|" + Date.now();
+    const extRef = cleanCourtId + "|" + cleanDate + "|" + cleanSlot + "|" + Date.now();
     const nowISO = new Date().toISOString();
     const nowAR  = aHoraArgentina(nowISO);
 
     const mpResponse = await pref.create({
       body: {
-        items: [{ title: "Seña – " + courtName + " – " + date + " " + slot + "hs",
-                  quantity: 1, unit_price: halfPrice, currency_id: "ARS",
-                  description: "Reserva a nombre de " + name }],
-        payer: { name },
+        items: [{
+          title: "Seña – " + courtName + " – " + cleanDate + " " + cleanSlot + "hs",
+          quantity: 1,
+          unit_price: halfPrice,
+          currency_id: "ARS",
+          description: "Reserva a nombre de " + cleanName
+        }],
+        payer: { name: cleanName },
         external_reference: extRef,
-        back_urls: { success: BASE_URL + "/success.html",
-                     failure: BASE_URL + "/failure.html",
-                     pending: BASE_URL + "/pending.html" },
+        back_urls: {
+          success: BASE_URL + "/success.html",
+          failure: BASE_URL + "/failure.html",
+          pending: BASE_URL + "/pending.html"
+        },
         auto_return: "approved",
         notification_url: BASE_URL + "/api/webhook",
         statement_descriptor: "CANCHA5",
         metadata: {
-          court_id:   String(courtId),
+          court_id:   cleanCourtId,
           court_name: courtName,
-          date, slot, name,
-          phone:      String(phone),
+          date:       cleanDate,
+          slot:       cleanSlot,
+          name:       cleanName,
+          phone:      cleanPhone,
           full_price: fullPrice,
           half_price: halfPrice,
           hora_ar:    nowAR,
@@ -97,10 +136,10 @@ module.exports = async function handler(req, res) {
       spreadsheetId: GOOGLE_SHEET_ID,
       range: TEMP_SHEET + "!A:E",
       valueInputOption: "RAW",
-      requestBody: { values: [[extRef, String(courtId), date, slot, nowISO]] }
+      requestBody: { values: [[extRef, cleanCourtId, cleanDate, cleanSlot, nowISO]] }
     });
 
-    console.log("Turno bloqueado en Temp:", date, slot, "por 10 min");
+    console.log("Turno bloqueado en Temp:", cleanDate, cleanSlot, "por 10 min");
 
     return res.status(200).json({
       init_point:    mpResponse.init_point,
@@ -139,7 +178,7 @@ async function checkDisponibilidad(sheets, sheetMes, courtId, date, slot) {
       if ((row[3]||"") !== slot) continue;
       const ts  = row[4] || "";
       const edad = ahora - new Date(ts).getTime();
-      if (edad <= EXPIRACION_MS) return false; // bloqueado activo
+      if (edad <= EXPIRACION_MS) return false;
     }
 
     return true;
@@ -240,7 +279,7 @@ async function getOrCreateSheetName(sheets, fechaTurno) {
 }
 
 async function getSheetsClient() {
-  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").trim();
+  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trim();
   const auth = new google.auth.GoogleAuth({
     credentials: { client_email: GOOGLE_SA_EMAIL, private_key: key },
     scopes: ["https://www.googleapis.com/auth/spreadsheets"]
