@@ -1,14 +1,15 @@
 // api/webhook.js
-// Al aprobar: escribe en hoja mensual + borra de Temp + ordena.
+// Al aprobar: escribe en hoja mensual + crea evento en Google Calendar + borra de Temp + ordena.
 // Al rechazar/cancelar: solo borra de Temp.
 
 const { MercadoPagoConfig, Payment } = require("mercadopago");
 const { google } = require("googleapis");
 
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
-const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const GOOGLE_SA_EMAIL = process.env.GOOGLE_SA_EMAIL;
-const GOOGLE_SA_KEY   = process.env.GOOGLE_SA_KEY;
+const MP_ACCESS_TOKEN    = process.env.MP_ACCESS_TOKEN;
+const GOOGLE_SHEET_ID    = process.env.GOOGLE_SHEET_ID;
+const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
+const GOOGLE_SA_EMAIL    = process.env.GOOGLE_SA_EMAIL;
+const GOOGLE_SA_KEY      = process.env.GOOGLE_SA_KEY;
 
 const TEMP_SHEET = "Temp";
 
@@ -25,20 +26,21 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST")    return res.status(405).end();
 
   try {
-    const { data } = req.body;
-    if (!data?.id) return res.status(200).json({ received: true });
+    const paymentId = req.body?.data?.id || req.body?.id || req.query?.id || req.query?.["data.id"];
+    if (!paymentId) return res.status(200).json({ received: true });
 
     const client  = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
     const payment = new Payment(client);
-    const pago    = await payment.get({ id: data.id });
+    const pago    = await payment.get({ id: paymentId });
 
     const estado = pago.status;
     const extRef = pago.external_reference || "";
     const meta   = pago.metadata || {};
 
-    console.log("Webhook:", data.id, "estado:", estado);
+    console.log("Webhook:", paymentId, "estado:", estado);
 
-    const sheets = await getSheetsClient();
+    const auth = getGoogleAuth();
+    const sheets = google.sheets({ version: "v4", auth });
 
     if (estado === "approved") {
       const fechaTurno = meta.date || "";
@@ -47,7 +49,7 @@ module.exports = async function handler(req, res) {
       // Evitar duplicados
       const yaExiste = await buscarConfirmada(sheets, sheetName, extRef);
       if (!yaExiste) {
-        const reservaId = "R" + data.id.toString().slice(-7);
+        const reservaId = "R" + paymentId.toString().slice(-7);
         await sheets.spreadsheets.values.append({
           spreadsheetId: GOOGLE_SHEET_ID,
           range: sheetName + "!A:K",
@@ -63,10 +65,24 @@ module.exports = async function handler(req, res) {
             meta.phone      || "",
             meta.full_price || "",
             "CONFIRMADA",
-            "Pago MP #" + data.id
+            "Pago MP #" + paymentId
           ]]}
         });
         console.log("CONFIRMADA escrita en:", sheetName);
+        
+        // Crear evento en Google Calendar
+        if (GOOGLE_CALENDAR_ID && meta.date && meta.slot) {
+          await crearEventoCalendar(auth, {
+            courtName: meta.court_name,
+            date: meta.date,
+            slot: meta.slot,
+            name: meta.name,
+            phone: meta.phone,
+            reservaId: reservaId,
+            paymentId: paymentId
+          });
+        }
+
         await ordenarHoja(sheets, sheetName);
       } else {
         console.log("Duplicado ignorado");
@@ -88,6 +104,39 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: err.message });
   }
 };
+
+async function crearEventoCalendar(auth, info) {
+  try {
+    const calendar = google.calendar({ version: "v3", auth });
+
+    const slotLimpio = info.slot.replace(" hs", "").trim();
+    const horaInicio = parseInt(slotLimpio.split(":")[0], 10);
+    const minutoInicio = slotLimpio.split(":")[1] || "00";
+
+    const startISO = `${info.date}T${String(horaInicio).padStart(2, "0")}:${minutoInicio}:00`;
+    const endISO   = `${info.date}T${String(horaInicio + 1).padStart(2, "0")}:${minutoInicio}:00`;
+
+    await calendar.events.insert({
+      calendarId: GOOGLE_CALENDAR_ID,
+      requestBody: {
+        summary: `⚽ ${info.courtName} - ${info.name}`,
+        description: `Reserva: ${info.reservaId}\nCliente: ${info.name}\nTeléfono: ${info.phone}\nPago MP: #${info.paymentId}`,
+        start: {
+          dateTime: new Date(startISO).toISOString(),
+          timeZone: "America/Argentina/Buenos_Aires"
+        },
+        end: {
+          dateTime: new Date(endISO).toISOString(),
+          timeZone: "America/Argentina/Buenos_Aires"
+        }
+      }
+    });
+
+    console.log("Evento creado en Google Calendar con éxito");
+  } catch (err) {
+    console.error("Error creando evento en Google Calendar:", err);
+  }
+}
 
 async function buscarConfirmada(sheets, sheetName, extRef) {
   const parts   = extRef.split("|");
@@ -198,11 +247,13 @@ async function getOrCreateSheetName(sheets, fechaTurno) {
   return nombre;
 }
 
-async function getSheetsClient() {
-  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").trim();
-  const auth = new google.auth.GoogleAuth({
+function getGoogleAuth() {
+  const key = GOOGLE_SA_KEY.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trim();
+  return new google.auth.GoogleAuth({
     credentials: { client_email: GOOGLE_SA_EMAIL, private_key: key },
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes: [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/calendar.events"
+    ]
   });
-  return google.sheets({ version: "v4", auth });
 }
