@@ -46,10 +46,11 @@ module.exports = async function handler(req, res) {
       const fechaTurno = meta.date || "";
       const sheetName  = await getOrCreateSheetName(sheets, fechaTurno);
 
-      // Evitar duplicados
+      // Evitar duplicados en Sheets
       const yaExiste = await buscarConfirmada(sheets, sheetName, extRef);
+      const reservaId = "R" + paymentId.toString().slice(-7);
+
       if (!yaExiste) {
-        const reservaId = "R" + paymentId.toString().slice(-7);
         await sheets.spreadsheets.values.append({
           spreadsheetId: GOOGLE_SHEET_ID,
           range: sheetName + "!A:K",
@@ -69,23 +70,22 @@ module.exports = async function handler(req, res) {
           ]]}
         });
         console.log("CONFIRMADA escrita en:", sheetName);
-        
-        // Crear evento en Google Calendar con horario exacto
-        if (GOOGLE_CALENDAR_ID && meta.date && meta.slot) {
-          await crearEventoCalendar(auth, {
-            courtName: meta.court_name,
-            date: meta.date,
-            slot: meta.slot,
-            name: meta.name,
-            phone: meta.phone,
-            reservaId: reservaId,
-            paymentId: paymentId
-          });
-        }
-
         await ordenarHoja(sheets, sheetName);
       } else {
-        console.log("Duplicado ignorado");
+        console.log("Duplicado ignorado en Sheets");
+      }
+
+      // Crear evento en Google Calendar (con deduplicación interna)
+      if (GOOGLE_CALENDAR_ID && meta.date && meta.slot) {
+        await crearEventoCalendar(auth, {
+          courtName: meta.court_name,
+          date: meta.date,
+          slot: meta.slot,
+          name: meta.name,
+          phone: meta.phone,
+          reservaId: reservaId,
+          paymentId: paymentId
+        });
       }
 
       // Borrar de Temp en cualquier caso
@@ -109,20 +109,40 @@ async function crearEventoCalendar(auth, info) {
   try {
     const calendar = google.calendar({ version: "v3", auth });
 
+    // ID único y determinístico para Google Calendar (caracteres base32/hex válidos)
+    const eventId = "cancha5mp" + String(info.paymentId).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+    // 1. Verificar si el evento ya existe
+    try {
+      const existing = await calendar.events.get({
+        calendarId: GOOGLE_CALENDAR_ID,
+        eventId: eventId
+      });
+      if (existing.data && existing.data.status !== "cancelled") {
+        console.log("El evento ya existe en Google Calendar, omitiendo duplicado:", eventId);
+        return;
+      }
+    } catch (err) {
+      if (err.status !== 404 && err.code !== 404) {
+        console.warn("Verificación previa de Calendar:", err.message);
+      }
+    }
+
     const slotLimpio = String(info.slot).replace(" hs", "").trim();
     const partesHora = slotLimpio.split(":");
     const horaInicio = parseInt(partesHora[0], 10);
     const minutoInicio = partesHora[1] || "00";
-
     const horaFin = horaInicio + 1;
 
     // Offset explícito para Argentina (-03:00)
     const startStr = `${info.date}T${String(horaInicio).padStart(2, "0")}:${minutoInicio}:00-03:00`;
     const endStr   = `${info.date}T${String(horaFin).padStart(2, "0")}:${minutoInicio}:00-03:00`;
 
+    // 2. Insertar con ID determinístico
     await calendar.events.insert({
       calendarId: GOOGLE_CALENDAR_ID,
       requestBody: {
+        id: eventId,
         summary: `⚽ ${info.courtName} - ${info.name}`,
         description: `Reserva: ${info.reservaId}\nCliente: ${info.name}\nTeléfono: ${info.phone}\nPago MP: #${info.paymentId}`,
         start: {
@@ -136,8 +156,12 @@ async function crearEventoCalendar(auth, info) {
       }
     });
 
-    console.log("Evento creado en Google Calendar en horario correcto:", startStr);
+    console.log("Evento creado en Google Calendar exitosamente:", eventId);
   } catch (err) {
+    if (err.status === 409 || err.code === 409) {
+      console.log("Evento duplicado bloqueado por ID único (409 Conflict)");
+      return;
+    }
     console.error("Error creando evento en Google Calendar:", err);
   }
 }
